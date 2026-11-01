@@ -2,14 +2,17 @@ import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import { emailMatchesProvider } from "./auth/providers";
 import { formatCpf, isValidCpf, onlyDigits } from "./cpf";
-import { DomainError } from "./data/repository";
+import { DomainError, mediaUrlPrefix } from "./data/repository";
 
 // mensagens de validação em português
 z.config(z.locales.pt());
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Cor inválida");
-// só aceitamos fotos enviadas pela própria plataforma (nada de URLs externas)
-const imageUrl = z.string().regex(/^\/api\/files\/img_[a-z0-9]+$/, "Imagem inválida");
+// só aceitamos fotos enviadas pela própria plataforma (bucket "media" do Supabase; nada de URLs externas)
+const imageUrl = z.string().refine((v) => {
+  if (!v.startsWith(mediaUrlPrefix())) return false;
+  return /^[0-9a-f-]{36}\/img_[a-z0-9]+\.(jpg|png|webp)$/.test(v.slice(mediaUrlPrefix().length));
+}, "Imagem inválida");
 const isoDate = z.iso.datetime({ offset: true }).nullable();
 const money = z.number().nonnegative().max(1_000_000);
 

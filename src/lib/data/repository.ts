@@ -1,8 +1,11 @@
-// Camada de acesso a dados.
-// Hoje: banco em memória (dados de exemplo). Amanhã: Supabase.
-// Toda a aplicação (páginas e API) fala SOMENTE com estas funções — para migrar,
-// basta reimplementá-las com o client do Supabase mantendo as mesmas assinaturas.
+// Camada de acesso a dados (Supabase / Postgres).
+// Toda a aplicação (páginas e API) fala SOMENTE com estas funções.
+// Operações que precisam ser atômicas (checkout, cancelamento, ajuste de estoque)
+// são funções SQL em supabase/schema.sql, chamadas via rpc().
 
+import "server-only";
+import { randomUUID } from "node:crypto";
+import type { PostgrestError } from "@supabase/supabase-js";
 import { IMAGE_TYPES, MAX_UPLOAD_BYTES, sniffType } from "../files";
 import { availableStock, priceOf, variantLabel } from "../pricing";
 import type {
@@ -15,6 +18,7 @@ import type {
   OrderStatus,
   Payment,
   PaymentMethod,
+  Plan,
   PlanId,
   Product,
   ProductOption,
@@ -26,13 +30,12 @@ import type {
   Variant,
 } from "../types";
 import { orderStatusLabel } from "../format";
-import { buildSeed, round, type Db } from "./seed";
-
-const g = globalThis as unknown as { __lojaflowDb?: Db };
-const db = (g.__lojaflowDb ??= buildSeed()); // sobrevive ao hot-reload do dev server
+import { MEDIA_BUCKET, RECEIPTS_BUCKET, supabase as sb } from "./supabase";
 
 const uid = (prefix: string) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 const DAY = 86_400_000;
+
+export const round = (v: number) => Math.round(v * 100) / 100;
 
 export class DomainError extends Error {
   constructor(message: string, public status = 400) {
@@ -42,59 +45,135 @@ export class DomainError extends Error {
 
 export const RESERVED_SLUGS = ["backoffice", "api", "admin", "login", "cadastro", "_next", "static"];
 
+/* ------------------------------------------------------------------ Infra */
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Ids vindos da URL: um valor que não é uuid simplesmente não existe (evita erro 500 no Postgres). */
+const isUuid = (v: unknown): v is string => typeof v === "string" && UUID.test(v);
+
+function fail(error: PostgrestError): never {
+  // raise exception das funções SQL: mensagem para o usuário; hint = status HTTP
+  if (error.code === "P0001") throw new DomainError(error.message, Number(error.hint) || 400);
+  if (error.code === "22P02") throw new DomainError("Registro não encontrado.", 404);
+  if (error.code === "23505") throw new DomainError("Já existe um registro com estes dados.", 409);
+  throw new Error(`Supabase: ${error.message} (${error.code})`);
+}
+
+/** Executa uma query e devolve `data`, convertendo erros do banco. */
+async function run<T = Row>(query: PromiseLike<{ data: unknown; error: PostgrestError | null }>): Promise<T> {
+  const { data, error } = await query;
+  if (error) fail(error);
+  return data as T;
+}
+
+const iso = (v: string | null | undefined) => (v ? new Date(v).toISOString() : null);
+const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+const camel = (k: string) => k.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
+/** camelCase → snake_case (só o primeiro nível: jsonb como items/address/options fica intacto). */
+function toRow(obj: object): Row {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined).map(([k, v]) => [snake(k), v]));
+}
+
+/** snake_case → camelCase, com datas normalizadas em ISO (mesmo formato de antes). */
+function fromRow<T>(row: Row): T {
+  return Object.fromEntries(
+    Object.entries(row).map(([k, v]) => {
+      const key = camel(k);
+      return [key, (key.endsWith("At") || key === "termsVersion") && typeof v === "string" ? iso(v) : v];
+    }),
+  ) as T;
+}
+
+const PRODUCT_SELECT = "*, product_variants(*)";
+
+function toProduct(r: Row): Product {
+  const variants = [...((r.product_variants as Row[]) ?? [])]
+    .sort((a, b) => a.position - b.position)
+    .map((v): Variant => ({ id: v.id, options: v.options, sku: v.sku, stock: v.stock, price: v.price }));
+  return {
+    id: r.id,
+    storeId: r.store_id,
+    name: r.name,
+    description: r.description,
+    price: r.price,
+    promo: r.promo_price != null ? { price: r.promo_price, startsAt: iso(r.promo_starts_at), endsAt: iso(r.promo_ends_at) } : null,
+    sku: r.sku,
+    trackStock: r.track_stock,
+    stock: r.stock,
+    lowStockThreshold: r.low_stock_threshold,
+    options: r.options,
+    variants,
+    category: r.category,
+    image: r.image,
+    images: r.images,
+    active: r.active,
+    createdAt: iso(r.created_at)!,
+  };
+}
+
+function toPayment(r: Row): Payment {
+  const { receiptPath, receiptName, receiptMime, receiptSize, ...rest } = fromRow<Row>(r);
+  return {
+    ...(rest as Omit<Payment, "receipt">),
+    receipt: receiptPath ? { fileId: receiptPath, fileName: receiptName, mimeType: receiptMime, size: receiptSize, uploadedAt: rest.submittedAt } : null,
+  };
+}
+
+const toStore = (r: Row) => fromRow<Store>(r);
+const toOrder = (r: Row) => fromRow<Order>(r);
+const toCustomer = (r: Row) => fromRow<Customer>(r);
+const toCoupon = (r: Row) => fromRow<Coupon>(r);
+
 /* ------------------------------------------------------------------ Planos */
 
 export async function listPlans() {
-  return db.plans;
+  return (await run<Row[]>(sb().from("plans").select("*").order("price_monthly"))).map((r) => fromRow<Plan>(r));
 }
 
 export async function getPlan(id: PlanId) {
-  return db.plans.find((p) => p.id === id)!;
+  return fromRow<Plan>(await run(sb().from("plans").select("*").eq("id", id).single()));
 }
 
 /* ------------------------------------------------------------------ Lojas */
 
 export async function listStores() {
-  return [...db.stores].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return (await run<Row[]>(sb().from("stores").select("*").order("created_at", { ascending: false }))).map(toStore);
 }
 
 export async function getStoreBySlug(slug: string) {
-  return db.stores.find((s) => s.slug === slug) ?? null;
+  const row = await run<Row | null>(sb().from("stores").select("*").eq("slug", slug).maybeSingle());
+  return row ? toStore(row) : null;
 }
 
 export async function createStore(input: Pick<Store, "slug" | "name" | "tagline" | "category" | "logo" | "brandColor" | "ownerName" | "ownerEmail" | "planId">) {
   if (RESERVED_SLUGS.includes(input.slug)) throw new DomainError("Este endereço é reservado.");
-  if (db.stores.some((s) => s.slug === input.slug)) throw new DomainError("Já existe uma loja com este endereço.", 409);
-  const store: Store = {
-    ...input,
-    id: uid("st"),
-    status: "trial",
-    shippingFlat: 19.9,
-    freeShippingOver: null,
-    logoUrl: null,
-    coverUrl: null,
-    about: "",
-    whatsapp: null,
-    instagram: null,
-    pixKey: input.ownerEmail,
-    customTerms: null,
-    termsUpdatedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  };
-  db.stores.push(store);
-  await log("admin", "Loja criada", store.slug);
-  return store;
+  if (await getStoreBySlug(input.slug)) throw new DomainError("Já existe uma loja com este endereço.", 409);
+  const now = new Date().toISOString();
+  const row = await run(
+    sb()
+      .from("stores")
+      .insert(toRow({ ...input, status: "trial", shippingFlat: 19.9, freeShippingOver: null, about: "", pixKey: input.ownerEmail, customTerms: null, termsUpdatedAt: now, createdAt: now }))
+      .select()
+      .single(),
+  );
+  await log("admin", "Loja criada", input.slug);
+  return toStore(row);
 }
 
 export async function updateStore(slug: string, patch: Partial<Omit<Store, "id" | "slug" | "createdAt">>, actor = "lojista") {
   const store = await requireStore(slug);
-  const termsChanged = patch.customTerms !== undefined && patch.customTerms !== store.customTerms;
-  Object.assign(store, patch);
+  const row = toRow(patch);
   // nova versão dos termos: clientes precisarão aceitar de novo na próxima compra
-  if (termsChanged) store.termsUpdatedAt = new Date().toISOString();
+  if (patch.customTerms !== undefined && patch.customTerms !== store.customTerms) row.terms_updated_at = new Date().toISOString();
+  if (!Object.keys(row).length) return store;
+  const updated = toStore(await run(sb().from("stores").update(row).eq("id", store.id).select().single()));
   if (patch.status) await log(actor, `Status alterado para ${patch.status}`, slug);
   if (patch.planId) await log(actor, `Plano alterado para ${patch.planId}`, slug);
-  return store;
+  return updated;
 }
 
 async function requireStore(slug: string) {
@@ -106,18 +185,21 @@ async function requireStore(slug: string) {
 /* ------------------------------------------------------------------ Produtos */
 
 export async function listProducts(storeId: string, opts: { includeInactive?: boolean; q?: string; category?: string } = {}) {
+  let query = sb().from("products").select(PRODUCT_SELECT).eq("store_id", storeId);
+  if (!opts.includeInactive) query = query.eq("active", true);
+  if (opts.category) query = query.eq("category", opts.category);
+  const products = (await run<Row[]>(query.order("created_at"))).map(toProduct);
   const q = opts.q?.toLowerCase().trim();
-  return db.products.filter(
-    (p) =>
-      p.storeId === storeId &&
-      (opts.includeInactive || p.active) &&
-      (!opts.category || p.category === opts.category) &&
-      (!q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || p.variants.some((v) => v.sku.toLowerCase().includes(q))),
+  if (!q) return products;
+  return products.filter(
+    (p) => p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || p.variants.some((v) => v.sku.toLowerCase().includes(q)),
   );
 }
 
 export async function getProduct(storeId: string, id: string) {
-  return db.products.find((p) => p.storeId === storeId && p.id === id) ?? null;
+  if (!isUuid(id)) return null;
+  const row = await run<Row | null>(sb().from("products").select(PRODUCT_SELECT).eq("store_id", storeId).eq("id", id).maybeSingle());
+  return row ? toProduct(row) : null;
 }
 
 export interface ProductInput {
@@ -141,7 +223,7 @@ const sameCombo = (a: Record<string, string>, b: Record<string, string>) =>
   Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
 
 /** Regras de consistência do catálogo (o schema Zod já validou formatos). */
-function checkProduct(storeId: string, input: ProductInput, selfId?: string) {
+async function checkProduct(storeId: string, input: ProductInput, selfId?: string) {
   if (input.promo) {
     if (input.promo.price >= input.price) throw new DomainError("O preço promocional deve ser menor que o preço normal.");
     if (input.promo.startsAt && input.promo.endsAt && input.promo.endsAt <= input.promo.startsAt) throw new DomainError("O fim da promoção deve ser depois do início.");
@@ -159,60 +241,97 @@ function checkProduct(storeId: string, input: ProductInput, selfId?: string) {
     if (input.variants.findIndex((w) => sameCombo(w.options, v.options)) !== i) throw new DomainError(`Combinação repetida: ${variantLabel(v)}.`);
   });
   // SKU único na loja (produtos e variações)
-  const taken = new Set(db.products.filter((p) => p.storeId === storeId && p.id !== selfId).flatMap((p) => [p.sku, ...p.variants.map((v) => v.sku)]).filter(Boolean));
-  for (const sku of [input.sku, ...input.variants.map((v) => v.sku)].filter(Boolean)) if (taken.has(sku)) throw new DomainError(`O SKU ${sku} já está em uso em outro produto.`);
+  const own = [input.sku, ...input.variants.map((v) => v.sku)].filter(Boolean);
+  if (new Set(own).size !== own.length) throw new DomainError("Há SKUs repetidos neste produto.");
+  const others = await run<Row[]>(sb().from("products").select("id, sku, product_variants(sku)").eq("store_id", storeId));
+  const taken = new Set(others.filter((p) => p.id !== selfId).flatMap((p) => [p.sku as string, ...(p.product_variants as Row[]).map((v) => v.sku as string)]).filter(Boolean));
+  for (const sku of own) if (taken.has(sku)) throw new DomainError(`O SKU ${sku} já está em uso em outro produto.`);
 }
 
-function recordMovement(m: Omit<StockMovement, "id" | "at">) {
-  if (m.delta === 0) return;
-  db.stockMovements.push({ ...m, id: uid("sm"), at: new Date().toISOString() });
+function productRow(input: ProductInput, stock: number) {
+  return {
+    name: input.name,
+    description: input.description,
+    category: input.category,
+    price: input.price,
+    promo_price: input.promo?.price ?? null,
+    promo_starts_at: input.promo?.startsAt ?? null,
+    promo_ends_at: input.promo?.endsAt ?? null,
+    sku: input.sku,
+    track_stock: input.trackStock,
+    stock,
+    low_stock_threshold: input.lowStockThreshold,
+    options: input.options,
+    image: input.image,
+    images: input.images,
+    active: input.active,
+  };
+}
+
+const variantRows = (storeId: string, productId: string, variants: Variant[]) =>
+  variants.map((v, position) => ({ id: v.id, product_id: productId, store_id: storeId, options: v.options, sku: v.sku, stock: v.stock, price: v.price, position }));
+
+async function recordMovements(movements: Omit<StockMovement, "id" | "at">[]) {
+  const rows = movements.filter((m) => m.delta !== 0).map((m) => toRow(m));
+  if (rows.length) await run(sb().from("stock_movements").insert(rows));
 }
 
 export async function createProduct(storeSlug: string, input: ProductInput, actor = "lojista") {
   const store = await requireStore(storeSlug);
   const plan = await getPlan(store.planId);
-  const count = db.products.filter((p) => p.storeId === store.id).length;
-  if (plan.maxProducts !== null && count >= plan.maxProducts) {
+  const { count, error } = await sb().from("products").select("id", { count: "exact", head: true }).eq("store_id", store.id);
+  if (error) fail(error);
+  if (plan.maxProducts !== null && (count ?? 0) >= plan.maxProducts) {
     throw new DomainError(`Seu plano ${plan.name} permite até ${plan.maxProducts} produtos.`, 403);
   }
-  checkProduct(store.id, input);
-  const variants = input.variants.map((v) => ({ ...v, id: uid("v") }));
-  const product: Product = {
-    ...input,
-    variants,
-    stock: variants.length ? variants.reduce((s, v) => s + v.stock, 0) : input.stock,
-    id: uid("p"),
-    storeId: store.id,
-    createdAt: new Date().toISOString(),
-  };
-  db.products.push(product);
-  const entries = variants.length ? variants.map((v) => [v.id, v.stock] as const) : ([[null, product.stock]] as const);
-  for (const [variantId, qty] of entries) recordMovement({ storeId: store.id, productId: product.id, variantId, delta: qty, balanceAfter: qty, reason: "initial", note: "Cadastro do produto", actor });
-  return product;
+  await checkProduct(store.id, input);
+  const variants: Variant[] = input.variants.map((v) => ({ ...v, id: randomUUID() }));
+  const stock = variants.length ? variants.reduce((s, v) => s + v.stock, 0) : input.stock;
+  const { id } = await run(sb().from("products").insert({ ...productRow(input, stock), store_id: store.id }).select("id").single());
+  if (variants.length) {
+    try {
+      await run(sb().from("product_variants").insert(variantRows(store.id, id, variants)));
+    } catch (e) {
+      await sb().from("products").delete().eq("id", id); // não deixa produto pela metade
+      throw e;
+    }
+  }
+  const entries = variants.length ? variants.map((v) => [v.id, v.stock] as const) : ([[null, stock]] as const);
+  await recordMovements(entries.map(([variantId, qty]) => ({ storeId: store.id, productId: id, variantId, delta: qty, balanceAfter: qty, reason: "initial", note: "Cadastro do produto", actor })));
+  return (await getProduct(store.id, id))!;
 }
 
 export async function updateProduct(storeSlug: string, id: string, input: ProductInput, actor = "lojista") {
   const store = await requireStore(storeSlug);
   const product = await getProduct(store.id, id);
   if (!product) throw new DomainError("Produto não encontrado.", 404);
-  checkProduct(store.id, input, product.id);
+  await checkProduct(store.id, input, product.id);
 
   // preserva ids das variações existentes (pelo id ou pela combinação) para manter o histórico de estoque
   const variants: Variant[] = input.variants.map((v) => {
     const prev = product.variants.find((p) => p.id === v.id) ?? product.variants.find((p) => sameCombo(p.options, v.options));
-    return { ...v, id: prev?.id ?? uid("v") };
+    return { ...v, id: prev?.id ?? randomUUID() };
   });
   // registra no histórico as mudanças de estoque feitas pelo formulário
+  const movements: Omit<StockMovement, "id" | "at">[] = [];
   if (variants.length) {
     for (const v of variants) {
       const before = product.variants.find((p) => p.id === v.id)?.stock ?? 0;
-      recordMovement({ storeId: store.id, productId: product.id, variantId: v.id, delta: v.stock - before, balanceAfter: v.stock, reason: "adjustment", note: "Editado no cadastro do produto", actor });
+      movements.push({ storeId: store.id, productId: product.id, variantId: v.id, delta: v.stock - before, balanceAfter: v.stock, reason: "adjustment", note: "Editado no cadastro do produto", actor });
     }
   } else if (!product.variants.length) {
-    recordMovement({ storeId: store.id, productId: product.id, variantId: null, delta: input.stock - product.stock, balanceAfter: input.stock, reason: "adjustment", note: "Editado no cadastro do produto", actor });
+    movements.push({ storeId: store.id, productId: product.id, variantId: null, delta: input.stock - product.stock, balanceAfter: input.stock, reason: "adjustment", note: "Editado no cadastro do produto", actor });
   }
-  Object.assign(product, { ...input, variants, stock: variants.length ? variants.reduce((s, v) => s + v.stock, 0) : input.stock });
-  return product;
+
+  const keep = variants.map((v) => v.id);
+  let removed = sb().from("product_variants").delete().eq("product_id", product.id);
+  if (keep.length) removed = removed.not("id", "in", `(${keep.join(",")})`);
+  await run(removed);
+  if (variants.length) await run(sb().from("product_variants").upsert(variantRows(store.id, product.id, variants)));
+  const stock = variants.length ? variants.reduce((s, v) => s + v.stock, 0) : input.stock;
+  await run(sb().from("products").update(productRow(input, stock)).eq("id", product.id));
+  await recordMovements(movements);
+  return (await getProduct(store.id, product.id))!;
 }
 
 /** Alterações rápidas (ex.: ativar/ocultar na lista) sem passar pelo formulário inteiro. */
@@ -222,8 +341,12 @@ export async function patchProduct(storeSlug: string, id: string, patch: Partial
   if (!product) throw new DomainError("Produto não encontrado.", 404);
   const next = { ...product, ...patch };
   if (next.promo && next.promo.price >= next.price) throw new DomainError("O preço promocional deve ser menor que o preço normal.");
-  Object.assign(product, patch);
-  return product;
+  const row: Row = {};
+  if (patch.active !== undefined) row.active = patch.active;
+  if (patch.price !== undefined) row.price = patch.price;
+  if (patch.promo !== undefined) Object.assign(row, { promo_price: patch.promo?.price ?? null, promo_starts_at: patch.promo?.startsAt ?? null, promo_ends_at: patch.promo?.endsAt ?? null });
+  if (Object.keys(row).length) await run(sb().from("products").update(row).eq("id", product.id));
+  return next;
 }
 
 export async function duplicateProduct(storeSlug: string, id: string, actor = "lojista") {
@@ -250,16 +373,19 @@ export async function duplicateProduct(storeSlug: string, id: string, actor = "l
 
 export async function deleteProduct(storeSlug: string, id: string) {
   const store = await requireStore(storeSlug);
-  const idx = db.products.findIndex((p) => p.storeId === store.id && p.id === id);
-  if (idx < 0) throw new DomainError("Produto não encontrado.", 404);
-  db.products.splice(idx, 1);
+  if (!isUuid(id)) throw new DomainError("Produto não encontrado.", 404);
+  const rows = await run<Row[]>(sb().from("products").delete().eq("store_id", store.id).eq("id", id).select("id"));
+  if (!rows.length) throw new DomainError("Produto não encontrado.", 404);
 }
 
 export async function bulkProducts(storeSlug: string, ids: string[], action: "activate" | "deactivate" | "delete") {
   const store = await requireStore(storeSlug);
-  const set = new Set(ids);
-  if (action === "delete") db.products = db.products.filter((p) => !(p.storeId === store.id && set.has(p.id)));
-  else db.products.filter((p) => p.storeId === store.id && set.has(p.id)).forEach((p) => (p.active = action === "activate"));
+  const valid = ids.filter(isUuid);
+  if (valid.length) {
+    const scope = sb().from("products");
+    if (action === "delete") await run(scope.delete().eq("store_id", store.id).in("id", valid));
+    else await run(scope.update({ active: action === "activate" }).eq("store_id", store.id).in("id", valid));
+  }
   return { count: ids.length };
 }
 
@@ -282,34 +408,43 @@ export async function adjustStock(storeSlug: string, input: StockAdjustInput, ac
   if (input.variantId && !variant) throw new DomainError("Variação não encontrada.", 404);
   if (!input.variantId && product.variants.length) throw new DomainError("Escolha a variação a ajustar.");
 
-  const current = variant ? variant.stock : product.stock;
-  const next = input.mode === "add" ? current + input.qty : input.mode === "remove" ? current - input.qty : input.qty;
-  if (next < 0) throw new DomainError(`Não é possível retirar ${input.qty}: há apenas ${current} em estoque.`);
-  if (variant) {
-    variant.stock = next;
-    product.stock = product.variants.reduce((s, v) => s + v.stock, 0);
-  } else product.stock = next;
-  recordMovement({ storeId: store.id, productId: product.id, variantId: variant?.id ?? null, delta: next - current, balanceAfter: next, reason: input.reason, note: input.note, actor });
-  return product;
+  // a função SQL trava a linha, valida o saldo e grava a movimentação na mesma transação
+  await run(
+    sb().rpc("adjust_stock", {
+      p_store_id: store.id,
+      p_product_id: product.id,
+      p_variant_id: variant?.id ?? null,
+      p_mode: input.mode,
+      p_qty: input.qty,
+      p_reason: input.reason,
+      p_note: input.note,
+      p_actor: actor,
+    }),
+  );
+  return (await getProduct(store.id, product.id))!;
 }
 
 export async function listStockMovements(storeId: string, opts: { productId?: string; limit?: number } = {}) {
-  return db.stockMovements
-    .filter((m) => m.storeId === storeId && (!opts.productId || m.productId === opts.productId))
-    .sort((a, b) => b.at.localeCompare(a.at))
-    .slice(0, opts.limit ?? 200);
+  let query = sb().from("stock_movements").select("*").eq("store_id", storeId);
+  if (opts.productId) {
+    if (!isUuid(opts.productId)) return [];
+    query = query.eq("product_id", opts.productId);
+  }
+  return (await run<Row[]>(query.order("at", { ascending: false }).limit(opts.limit ?? 200))).map((r) => fromRow<StockMovement>(r));
 }
 
 /* ------------------------------------------------------------------ Cupons */
 
 export async function listCoupons(storeId: string) {
-  return db.coupons.filter((c) => c.storeId === storeId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return (await run<Row[]>(sb().from("coupons").select("*").eq("store_id", storeId).order("created_at", { ascending: false }))).map(toCoupon);
 }
 
 export type CouponInput = Pick<Coupon, "code" | "type" | "value" | "minSubtotal" | "startsAt" | "endsAt" | "maxUses" | "active">;
 
-function checkCoupon(storeId: string, input: CouponInput, selfId?: string) {
-  if (db.coupons.some((c) => c.storeId === storeId && c.id !== selfId && c.code === input.code)) throw new DomainError(`Já existe um cupom ${input.code}.`, 409);
+async function checkCoupon(storeId: string, input: CouponInput, selfId?: string) {
+  let dup = sb().from("coupons").select("id").eq("store_id", storeId).eq("code", input.code);
+  if (selfId) dup = dup.neq("id", selfId);
+  if ((await run<Row[]>(dup)).length) throw new DomainError(`Já existe um cupom ${input.code}.`, 409);
   if (input.type === "percent" && (input.value <= 0 || input.value > 90)) throw new DomainError("O desconto percentual deve ser entre 1% e 90%.");
   if (input.type === "fixed" && input.value <= 0) throw new DomainError("Informe o valor do desconto.");
   if (input.startsAt && input.endsAt && input.endsAt <= input.startsAt) throw new DomainError("A validade final deve ser depois do início.");
@@ -317,24 +452,27 @@ function checkCoupon(storeId: string, input: CouponInput, selfId?: string) {
 
 export async function createCoupon(storeSlug: string, input: CouponInput) {
   const store = await requireStore(storeSlug);
-  checkCoupon(store.id, input);
-  const coupon: Coupon = { ...input, id: uid("cp"), storeId: store.id, uses: 0, createdAt: new Date().toISOString() };
-  db.coupons.push(coupon);
-  return coupon;
+  await checkCoupon(store.id, input);
+  return toCoupon(await run(sb().from("coupons").insert(toRow({ ...input, storeId: store.id, uses: 0 })).select().single()));
+}
+
+async function findCoupon(storeId: string, id: string) {
+  if (!isUuid(id)) return null;
+  const row = await run<Row | null>(sb().from("coupons").select("*").eq("store_id", storeId).eq("id", id).maybeSingle());
+  return row ? toCoupon(row) : null;
 }
 
 export async function updateCoupon(storeSlug: string, id: string, patch: Partial<CouponInput>) {
   const store = await requireStore(storeSlug);
-  const coupon = db.coupons.find((c) => c.storeId === store.id && c.id === id);
+  const coupon = await findCoupon(store.id, id);
   if (!coupon) throw new DomainError("Cupom não encontrado.", 404);
-  checkCoupon(store.id, { ...coupon, ...patch }, coupon.id);
-  Object.assign(coupon, patch);
-  return coupon;
+  await checkCoupon(store.id, { ...coupon, ...patch }, coupon.id);
+  return toCoupon(await run(sb().from("coupons").update(toRow(patch)).eq("id", coupon.id).select().single()));
 }
 
 export async function deleteCoupon(storeSlug: string, id: string) {
   const store = await requireStore(storeSlug);
-  db.coupons = db.coupons.filter((c) => !(c.storeId === store.id && c.id === id));
+  if (isUuid(id)) await run(sb().from("coupons").delete().eq("store_id", store.id).eq("id", id));
 }
 
 export type CouponStatus = "active" | "scheduled" | "expired" | "exhausted" | "disabled";
@@ -350,7 +488,8 @@ export function couponStatus(c: Coupon, now = Date.now()): CouponStatus {
 /** Calcula o efeito do cupom sobre um carrinho. Lança erro com a mensagem para o cliente. */
 export async function evaluateCoupon(store: Store, rawCode: string, subtotal: number, shipping: number) {
   const code = rawCode.trim().toUpperCase();
-  const coupon = db.coupons.find((c) => c.storeId === store.id && c.code === code);
+  const row = await run<Row | null>(sb().from("coupons").select("*").eq("store_id", store.id).eq("code", code).maybeSingle());
+  const coupon = row && toCoupon(row);
   const status = coupon && couponStatus(coupon);
   if (!coupon || status === "disabled") throw new DomainError("Cupom inválido.");
   if (status === "expired") throw new DomainError("Este cupom expirou.");
@@ -363,6 +502,11 @@ export async function evaluateCoupon(store: Store, rawCode: string, subtotal: nu
 
 /* ------------------------------------------------------------------ Mídia (fotos públicas) */
 
+const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf", "image/svg+xml": "svg" };
+
+/** Prefixo das URLs públicas do bucket "media" (usado também na validação). */
+export const mediaUrlPrefix = () => `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/${MEDIA_BUCKET}/`;
+
 export async function saveImage(storeSlug: string, file: { name: string; data: Buffer }) {
   const store = await requireStore(storeSlug);
   if (file.data.length === 0) throw new DomainError("Arquivo vazio.");
@@ -370,40 +514,37 @@ export async function saveImage(storeSlug: string, file: { name: string; data: B
   const mimeType = sniffType(file.data);
   if (!mimeType || !IMAGE_TYPES.includes(mimeType)) throw new DomainError("Envie uma imagem JPG, PNG ou WEBP.", 415);
   const id = uid("img");
-  db.media.set(id, { name: file.name, mimeType, data: file.data, storeId: store.id });
-  return { id, url: `/api/files/${id}` };
-}
-
-export async function getImage(id: string) {
-  return db.media.get(id) ?? null;
+  const path = `${store.id}/${id}.${EXT[mimeType]}`;
+  const { error } = await sb().storage.from(MEDIA_BUCKET).upload(path, file.data, { contentType: mimeType, cacheControl: "31536000" });
+  if (error) throw new Error(`Storage: ${error.message}`);
+  return { id, url: sb().storage.from(MEDIA_BUCKET).getPublicUrl(path).data.publicUrl };
 }
 
 /* ------------------------------------------------------------------ Usuários (login social) */
 
 export async function getUser(id: string) {
-  return db.users.find((u) => u.id === id) ?? null;
+  if (!isUuid(id)) return null; // ex.: cookie antigo da versão em memória
+  const row = await run<Row | null>(sb().from("users").select("*").eq("id", id).maybeSingle());
+  return row ? fromRow<User>(row) : null;
 }
 
 export async function upsertUser(input: { email: string; name: string; provider: AuthProvider }) {
   const email = input.email.trim().toLowerCase();
-  let user = db.users.find((u) => u.email === email);
-  if (!user) {
-    user = { id: uid("u"), email, name: input.name.trim(), provider: input.provider, createdAt: new Date().toISOString() };
-    db.users.push(user);
-  }
-  return user;
+  // ignoreDuplicates: quem já existe mantém nome e provedor originais
+  await run(sb().from("users").upsert({ email, name: input.name.trim(), provider: input.provider }, { onConflict: "email", ignoreDuplicates: true }));
+  return fromRow<User>(await run(sb().from("users").select("*").eq("email", email).single()));
 }
 
 /* ------------------------------------------------------------------ Clientes */
 
 /** Perfil do usuário nesta loja. Vincula automaticamente um cliente antigo com o mesmo e-mail. */
 export async function getCustomerForUser(storeId: string, user: User) {
-  const customer = db.customers.find((c) => c.storeId === storeId && (c.userId === user.id || c.email === user.email)) ?? null;
-  if (customer && !customer.userId) {
-    customer.userId = user.id;
-    customer.provider = user.provider;
-  }
-  return customer;
+  const byUser = await run<Row | null>(sb().from("customers").select("*").eq("store_id", storeId).eq("user_id", user.id).limit(1).maybeSingle());
+  if (byUser) return toCustomer(byUser);
+  const byEmail = await run<Row | null>(sb().from("customers").select("*").eq("store_id", storeId).eq("email", user.email).maybeSingle());
+  if (!byEmail) return null;
+  if (!byEmail.user_id) return toCustomer(await run(sb().from("customers").update({ user_id: user.id, provider: user.provider }).eq("id", byEmail.id).select().single()));
+  return toCustomer(byEmail);
 }
 
 export function isProfileComplete(customer: Customer | null, store: Store) {
@@ -422,8 +563,7 @@ export interface ProfileInput {
 
 export async function saveCustomerProfile(storeSlug: string, user: User, input: ProfileInput) {
   const store = await requireStore(storeSlug);
-  const now = new Date().toISOString();
-  const fields = {
+  const fields = toRow({
     name: input.name,
     cpf: input.cpf,
     phone: input.phone,
@@ -432,17 +572,14 @@ export async function saveCustomerProfile(storeSlug: string, user: User, input: 
     city: `${input.address.city}, ${input.address.state}`,
     marketingOptIn: input.marketingOptIn,
     termsVersion: store.termsUpdatedAt,
-    acceptedTermsAt: now,
-  };
-  let customer = await getCustomerForUser(store.id, user);
-  if (customer) Object.assign(customer, fields);
-  else {
-    customer = { ...fields, id: uid("c"), storeId: store.id, userId: user.id, provider: user.provider, email: user.email, createdAt: now };
-    db.customers.push(customer);
-  }
-  return customer;
+    acceptedTermsAt: new Date().toISOString(),
+  });
+  const customer = await getCustomerForUser(store.id, user);
+  const saved = customer
+    ? await run(sb().from("customers").update(fields).eq("id", customer.id).select().single())
+    : await run(sb().from("customers").insert({ ...fields, store_id: store.id, user_id: user.id, provider: user.provider, email: user.email }).select().single());
+  return toCustomer(saved);
 }
-
 
 export interface CustomerWithStats extends Customer {
   orders: number;
@@ -451,43 +588,48 @@ export interface CustomerWithStats extends Customer {
 }
 
 export async function listCustomers(storeId: string): Promise<CustomerWithStats[]> {
-  const orders = db.orders.filter((o) => o.storeId === storeId && o.status !== "cancelled");
-  return db.customers
-    .filter((c) => c.storeId === storeId)
+  const [customers, orders] = await Promise.all([
+    run<Row[]>(sb().from("customers").select("*").eq("store_id", storeId)),
+    run<Row[]>(sb().from("orders").select("customer_id, total, created_at").eq("store_id", storeId).neq("status", "cancelled")),
+  ]);
+  return customers
+    .map(toCustomer)
     .map((c) => {
-      const mine = orders.filter((o) => o.customerId === c.id);
+      const mine = orders.filter((o) => o.customer_id === c.id);
       return {
         ...c,
         orders: mine.length,
         spent: round(mine.reduce((s, o) => s + o.total, 0)),
-        lastOrderAt: mine.map((o) => o.createdAt).sort().at(-1) ?? null,
+        lastOrderAt: iso(mine.map((o) => iso(o.created_at)!).sort().at(-1)),
       };
     })
     .sort((a, b) => b.spent - a.spent);
 }
 
 export async function getCustomer(id: string) {
-  return db.customers.find((c) => c.id === id) ?? null;
+  if (!isUuid(id)) return null;
+  const row = await run<Row | null>(sb().from("customers").select("*").eq("id", id).maybeSingle());
+  return row ? toCustomer(row) : null;
 }
 
 /* ------------------------------------------------------------------ Pedidos */
 
 export async function listOrders(filter: { storeId?: string; status?: OrderStatus; customerEmail?: string } = {}) {
-  const customerIds = filter.customerEmail
-    ? new Set(db.customers.filter((c) => c.email === filter.customerEmail).map((c) => c.id))
-    : null;
-  return db.orders
-    .filter(
-      (o) =>
-        (!filter.storeId || o.storeId === filter.storeId) &&
-        (!filter.status || o.status === filter.status) &&
-        (!customerIds || customerIds.has(o.customerId)),
-    )
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  let query = sb().from("orders").select("*");
+  if (filter.storeId) query = query.eq("store_id", filter.storeId);
+  if (filter.status) query = query.eq("status", filter.status);
+  if (filter.customerEmail) {
+    const ids = (await run<Row[]>(sb().from("customers").select("id").eq("email", filter.customerEmail))).map((c) => c.id as string);
+    if (!ids.length) return [];
+    query = query.in("customer_id", ids);
+  }
+  return (await run<Row[]>(query.order("created_at", { ascending: false }))).map(toOrder);
 }
 
 export async function getOrder(storeId: string, id: string) {
-  return db.orders.find((o) => o.storeId === storeId && o.id === id) ?? null;
+  if (!isUuid(id)) return null;
+  const row = await run<Row | null>(sb().from("orders").select("*").eq("store_id", storeId).eq("id", id).maybeSingle());
+  return row ? toOrder(row) : null;
 }
 
 export interface CheckoutInput {
@@ -505,8 +647,7 @@ export async function createOrder(storeSlug: string, user: User, input: Checkout
   const customer = await getCustomerForUser(store.id, user);
   if (!customer || !isProfileComplete(customer, store)) throw new DomainError("Complete seu cadastro e aceite os termos antes de comprar.", 403);
 
-  // Agrupa linhas repetidas e valida tudo antes de mexer no estoque
-  // (no Supabase isto vira uma RPC transacional com SELECT ... FOR UPDATE).
+  // Agrupa linhas repetidas e valida tudo antes de mexer no estoque.
   const grouped = new Map<string, { productId: string; variantId: string | null; qty: number }>();
   for (const it of input.items) {
     const key = `${it.productId}:${it.variantId ?? ""}`;
@@ -514,16 +655,16 @@ export async function createOrder(storeSlug: string, user: User, input: Checkout
     g.qty += it.qty;
     grouped.set(key, g);
   }
-  const lines = await Promise.all(
-    [...grouped.values()].map(async ({ productId, variantId, qty }) => {
-      const product = await getProduct(store.id, productId);
-      if (!product || !product.active) throw new DomainError("Um dos produtos não está mais disponível.");
-      const variant = variantId ? (product.variants.find((v) => v.id === variantId) ?? null) : null;
-      if (product.variants.length && !variant) throw new DomainError(`Escolha uma opção de "${product.name}".`);
-      if (availableStock(product, variant) < qty) throw new DomainError(`Estoque insuficiente para "${product.name}${variant ? ` (${variantLabel(variant)})` : ""}".`);
-      return { product, variant, qty, unitPrice: priceOf(product, variant).price };
-    }),
-  );
+  const ids = [...new Set([...grouped.values()].map((g) => g.productId))].filter(isUuid);
+  const products = ids.length ? (await run<Row[]>(sb().from("products").select(PRODUCT_SELECT).eq("store_id", store.id).in("id", ids))).map(toProduct) : [];
+  const lines = [...grouped.values()].map(({ productId, variantId, qty }) => {
+    const product = products.find((p) => p.id === productId);
+    if (!product || !product.active) throw new DomainError("Um dos produtos não está mais disponível.");
+    const variant = variantId ? (product.variants.find((v) => v.id === variantId) ?? null) : null;
+    if (product.variants.length && !variant) throw new DomainError(`Escolha uma opção de "${product.name}".`);
+    if (availableStock(product, variant) < qty) throw new DomainError(`Estoque insuficiente para "${product.name}${variant ? ` (${variantLabel(variant)})` : ""}".`);
+    return { product, variant, qty, unitPrice: priceOf(product, variant).price };
+  });
 
   const subtotal = round(lines.reduce((s, l) => s + l.unitPrice * l.qty, 0));
   let shipping = store.freeShippingOver !== null && subtotal >= store.freeShippingOver ? 0 : store.shippingFlat;
@@ -534,66 +675,39 @@ export async function createOrder(storeSlug: string, user: User, input: Checkout
     ({ coupon, discount, shipping } = applied);
   }
 
-  // tudo validado: baixa o estoque e registra as movimentações
-  for (const { product, variant, qty } of lines) {
-    if (!product.trackStock) continue;
-    if (variant) variant.stock -= qty;
-    const balance = variant ? variant.stock : (product.stock -= qty);
-    if (variant) product.stock = product.variants.reduce((s, v) => s + v.stock, 0);
-    recordMovement({ storeId: store.id, productId: product.id, variantId: variant?.id ?? null, delta: -qty, balanceAfter: balance, reason: "sale", note: "Venda", actor: "sistema" });
-  }
-  if (coupon) coupon.uses++;
-  const lastNumber = Math.max(1000, ...db.orders.filter((o) => o.storeId === store.id).map((o) => o.number));
-  const now = new Date().toISOString();
-  const order: Order = {
-    id: uid("o"),
-    number: lastNumber + 1,
-    storeId: store.id,
-    customerId: customer.id,
-    items: lines.map(({ product, variant, qty, unitPrice }) => ({
-      productId: product.id,
-      variantId: variant?.id ?? null,
-      variantLabel: variant ? variantLabel(variant) : null,
-      name: product.name,
-      image: product.image,
-      imageUrl: product.images[0] ?? null,
-      price: unitPrice,
-      qty,
-    })),
-    subtotal,
-    discount,
-    couponCode: coupon?.code ?? null,
-    shipping,
-    total: round(subtotal - discount + shipping),
-    // Fica aguardando até o lojista aprovar o comprovante (ou, no futuro, o webhook do Mercado Pago).
-    status: "pending",
-    paymentMethod: input.paymentMethod,
-    trackingCode: null,
-    address: formatAddress(customer.address!),
-    createdAt: now,
-    updatedAt: now,
-  };
-  db.orders.push(order);
-  db.payments.push({
-    id: uid("pay"),
-    orderId: order.id,
-    storeId: store.id,
-    provider: "manual",
-    method: input.paymentMethod,
-    amount: order.total,
-    status: "awaiting",
-    receipt: null,
-    submittedAt: null,
-    reviewedAt: null,
-    reviewedBy: null,
-    rejectionReason: null,
-    externalId: null,
-    createdAt: now,
-  });
-  return order;
+  // A função SQL baixa o estoque (conferindo o saldo de novo, com a linha travada),
+  // consome o cupom e cria pedido + pagamento numa única transação.
+  const row = await run(
+    sb().rpc("create_order", {
+      p_store_id: store.id,
+      p_customer_id: customer.id,
+      p_items: lines.map(({ product, variant, qty, unitPrice }) => ({
+        productId: product.id,
+        variantId: variant?.id ?? null,
+        variantLabel: variant ? variantLabel(variant) : null,
+        name: product.name,
+        image: product.image,
+        imageUrl: product.images[0] ?? null,
+        price: unitPrice,
+        qty,
+      })),
+      p_stock: lines
+        .filter((l) => l.product.trackStock)
+        .map(({ product, variant, qty }) => ({ productId: product.id, variantId: variant?.id ?? null, qty, label: `${product.name}${variant ? ` (${variantLabel(variant)})` : ""}` })),
+      p_subtotal: subtotal,
+      p_discount: discount,
+      p_shipping: shipping,
+      p_total: round(subtotal - discount + shipping),
+      p_coupon_id: coupon?.id ?? null,
+      p_coupon_code: coupon?.code ?? null,
+      p_payment_method: input.paymentMethod,
+      p_address: formatAddress(customer.address!),
+    }),
+  );
+  return toOrder(row);
 }
 
-// pending → paid acontece somente via approvePayment().
+// pending → paid acontece somente via reviewPayment().
 const transitions: Record<OrderStatus, OrderStatus[]> = {
   pending: ["cancelled"],
   paid: ["shipped", "cancelled"],
@@ -606,9 +720,10 @@ export const nextStatuses = (s: OrderStatus) => transitions[s];
 
 export async function updateOrder(storeSlug: string, id: string, patch: { status?: OrderStatus; trackingCode?: string }) {
   const store = await requireStore(storeSlug);
-  const order = await getOrder(store.id, id);
+  let order = await getOrder(store.id, id);
   if (!order) throw new DomainError("Pedido não encontrado.", 404);
 
+  const row: Row = {};
   if (patch.status && patch.status !== order.status) {
     if (!transitions[order.status].includes(patch.status)) {
       if (order.status === "pending" && patch.status !== "cancelled") throw new DomainError("Aprove o pagamento antes de avançar o pedido.");
@@ -617,36 +732,34 @@ export async function updateOrder(storeSlug: string, id: string, patch: { status
     if (patch.status === "shipped" && !(patch.trackingCode || order.trackingCode)) {
       throw new DomainError("Informe o código de rastreio para marcar como enviado.");
     }
-    if (patch.status === "cancelled") {
-      const payment = await getPayment(order.id);
-      if (payment && payment.status !== "approved") payment.status = "cancelled";
-      // devolve ao estoque (produto/variação ainda existentes e com controle de estoque)
-      for (const it of order.items) {
-        const p = db.products.find((x) => x.id === it.productId);
-        if (!p || !p.trackStock) continue;
-        const v = it.variantId ? p.variants.find((x) => x.id === it.variantId) : null;
-        if (it.variantId && !v) continue;
-        if (v) v.stock += it.qty;
-        const balance = v ? v.stock : (p.stock += it.qty);
-        if (v) p.stock = p.variants.reduce((s, x) => s + x.stock, 0);
-        recordMovement({ storeId: store.id, productId: p.id, variantId: v?.id ?? null, delta: it.qty, balanceAfter: balance, reason: "cancel", note: `Pedido #${order.number} cancelado`, actor: "sistema" });
-      }
-    }
-    order.status = patch.status;
+    // cancelar devolve o estoque e cancela o pagamento — tudo na função SQL
+    if (patch.status === "cancelled") order = toOrder(await run(sb().rpc("cancel_order", { p_order_id: order.id })));
+    else row.status = patch.status;
   }
-  if (patch.trackingCode !== undefined) order.trackingCode = patch.trackingCode || null;
-  order.updatedAt = new Date().toISOString();
-  return order;
+  if (patch.trackingCode !== undefined) row.tracking_code = patch.trackingCode || null;
+  if (!Object.keys(row).length) return order;
+
+  // só aplica se ninguém mudou o status no meio do caminho
+  const updated = await run<Row | null>(
+    sb().from("orders").update({ ...row, updated_at: new Date().toISOString() }).eq("id", order.id).eq("status", order.status).select().maybeSingle(),
+  );
+  if (!updated) throw new DomainError("O pedido foi alterado por outra pessoa. Recarregue a página.", 409);
+  return toOrder(updated);
 }
 
 /* ------------------------------------------------------------------ Pagamentos */
 
 export async function getPayment(orderId: string) {
-  return db.payments.find((p) => p.orderId === orderId) ?? null;
+  if (!isUuid(orderId)) return null;
+  const row = await run<Row | null>(sb().from("payments").select("*").eq("order_id", orderId).maybeSingle());
+  return row ? toPayment(row) : null;
 }
 
 export async function listPayments(filter: { storeId?: string; status?: Payment["status"] } = {}) {
-  return db.payments.filter((p) => (!filter.storeId || p.storeId === filter.storeId) && (!filter.status || p.status === filter.status));
+  let query = sb().from("payments").select("*");
+  if (filter.storeId) query = query.eq("store_id", filter.storeId);
+  if (filter.status) query = query.eq("status", filter.status);
+  return (await run<Row[]>(query)).map(toPayment);
 }
 
 export const RECEIPT_TYPES = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
@@ -663,27 +776,36 @@ export async function submitReceipt(storeSlug: string, orderId: string, user: Us
   // confere o conteúdo real do arquivo, não só o tipo declarado pelo navegador
   const sniffed = sniffType(file.data);
   if (!sniffed || !RECEIPT_TYPES.includes(sniffed)) throw new DomainError("Envie uma imagem (JPG, PNG, WEBP) ou PDF.", 415);
-  file = { ...file, mimeType: sniffed };
   if (file.data.length > RECEIPT_MAX_BYTES) throw new DomainError("O arquivo deve ter no máximo 5 MB.", 413);
   if (file.data.length === 0) throw new DomainError("Arquivo vazio.");
 
-  const fileId = uid("f");
-  db.files.set(fileId, { name: file.name, mimeType: file.mimeType, data: file.data });
-  if (payment.receipt) db.files.delete(payment.receipt.fileId);
+  const path = `${store.id}/${order.id}/${uid("f")}.${EXT[sniffed]}`;
+  const { error } = await sb().storage.from(RECEIPTS_BUCKET).upload(path, file.data, { contentType: sniffed });
+  if (error) throw new Error(`Storage: ${error.message}`);
   const now = new Date().toISOString();
-  Object.assign(payment, {
-    status: "in_review",
-    receipt: { fileId, fileName: file.name, mimeType: file.mimeType, size: file.data.length, uploadedAt: now },
-    submittedAt: now,
-    rejectionReason: null,
-  });
-  return payment;
+  const updated = await run<Row | null>(
+    sb()
+      .from("payments")
+      .update({ status: "in_review", receipt_path: path, receipt_name: file.name, receipt_mime: sniffed, receipt_size: file.data.length, submitted_at: now, rejection_reason: null })
+      .eq("id", payment.id)
+      .in("status", ["awaiting", "rejected"])
+      .select()
+      .maybeSingle(),
+  );
+  if (!updated) {
+    await sb().storage.from(RECEIPTS_BUCKET).remove([path]);
+    throw new DomainError("Este pedido não está aguardando pagamento.");
+  }
+  if (payment.receipt) await sb().storage.from(RECEIPTS_BUCKET).remove([payment.receipt.fileId]);
+  return toPayment(updated);
 }
 
 export async function getReceiptFile(storeId: string, orderId: string) {
   const payment = await getPayment(orderId);
   if (!payment || payment.storeId !== storeId || !payment.receipt) return null;
-  return db.files.get(payment.receipt.fileId) ?? null;
+  const { data, error } = await sb().storage.from(RECEIPTS_BUCKET).download(payment.receipt.fileId);
+  if (error || !data) return null;
+  return { name: payment.receipt.fileName, mimeType: payment.receipt.mimeType, data: Buffer.from(await data.arrayBuffer()) };
 }
 
 /** Lojista aprova (libera o envio) ou recusa o pagamento. */
@@ -693,21 +815,31 @@ export async function reviewPayment(storeSlug: string, orderId: string, decision
   const payment = order && (await getPayment(order.id));
   if (!order || !payment) throw new DomainError("Pedido não encontrado.", 404);
   if (!["awaiting", "in_review"].includes(payment.status)) throw new DomainError("Este pagamento já foi analisado.");
+  if (!decision.approve && !decision.reason?.trim()) throw new DomainError("Informe o motivo da recusa para o cliente.");
   const now = new Date().toISOString();
-  if (decision.approve) {
-    Object.assign(payment, { status: "approved", reviewedAt: now, reviewedBy: actor, rejectionReason: null });
-    order.status = "paid";
-  } else {
-    if (!decision.reason?.trim()) throw new DomainError("Informe o motivo da recusa para o cliente.");
-    Object.assign(payment, { status: "rejected", reviewedAt: now, reviewedBy: actor, rejectionReason: decision.reason.trim() });
-  }
-  order.updatedAt = now;
-  return payment;
+  const updated = await run<Row | null>(
+    sb()
+      .from("payments")
+      .update(
+        decision.approve
+          ? { status: "approved", reviewed_at: now, reviewed_by: actor, rejection_reason: null }
+          : { status: "rejected", reviewed_at: now, reviewed_by: actor, rejection_reason: decision.reason!.trim() },
+      )
+      .eq("id", payment.id)
+      .in("status", ["awaiting", "in_review"])
+      .select()
+      .maybeSingle(),
+  );
+  if (!updated) throw new DomainError("Este pagamento já foi analisado.");
+  await run(sb().from("orders").update({ ...(decision.approve && order.status === "pending" ? { status: "paid" } : {}), updated_at: now }).eq("id", order.id));
+  return toPayment(updated);
 }
 
 /* ------------------------------------------------------------------ Analytics */
 
-function dailySeries(orders: Order[], days: number) {
+type OrderLite = Pick<Order, "storeId" | "customerId" | "items" | "total" | "status" | "paymentMethod" | "createdAt">;
+
+function dailySeries(orders: OrderLite[], days: number) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const buckets = Array.from({ length: days }, (_, i) => {
@@ -725,7 +857,7 @@ function dailySeries(orders: Order[], days: number) {
   return buckets;
 }
 
-const within = (o: Order, fromMs: number, toMs: number) => {
+const within = (o: OrderLite, fromMs: number, toMs: number) => {
   const t = new Date(o.createdAt).getTime();
   return t >= fromMs && t < toMs;
 };
@@ -734,7 +866,8 @@ const growth = (curr: number, prev: number) => (prev === 0 ? (curr > 0 ? 100 : 0
 
 export async function storeMetrics(storeId: string, days = 30) {
   const now = Date.now();
-  const valid = db.orders.filter((o) => o.storeId === storeId && o.status !== "cancelled");
+  const all = (await run<Row[]>(sb().from("orders").select("store_id, customer_id, items, total, status, payment_method, created_at").eq("store_id", storeId))).map((r) => fromRow<OrderLite>(r));
+  const valid = all.filter((o) => o.status !== "cancelled");
   const curr = valid.filter((o) => within(o, now - days * DAY, now + 1));
   const prev = valid.filter((o) => within(o, now - 2 * days * DAY, now - days * DAY));
   const revenue = round(curr.reduce((s, o) => s + o.total, 0));
@@ -749,7 +882,6 @@ export async function storeMetrics(storeId: string, days = 30) {
       productAgg.set(it.productId, a);
     }
 
-  const all = db.orders.filter((o) => o.storeId === storeId);
   const statusCount = Object.fromEntries(
     (["pending", "paid", "shipped", "delivered", "cancelled"] as OrderStatus[]).map((s) => [s, all.filter((o) => o.status === s).length]),
   ) as Record<OrderStatus, number>;
@@ -773,19 +905,26 @@ export async function storeMetrics(storeId: string, days = 30) {
 
 export async function platformMetrics(days = 30) {
   const now = Date.now();
-  const valid = db.orders.filter((o) => o.status !== "cancelled");
+  const since = new Date(now - 2 * days * DAY).toISOString();
+  const [orderRows, stores, plans, productRows] = await Promise.all([
+    run<Row[]>(sb().from("orders").select("store_id, customer_id, total, status, payment_method, created_at").neq("status", "cancelled").gte("created_at", since)),
+    listStores(),
+    listPlans(),
+    run<Row[]>(sb().from("products").select("store_id")),
+  ]);
+  const valid = orderRows.map((r) => fromRow<OrderLite>({ ...r, items: [] }));
   const curr = valid.filter((o) => within(o, now - days * DAY, now + 1));
   const prev = valid.filter((o) => within(o, now - 2 * days * DAY, now - days * DAY));
   const gmv = round(curr.reduce((s, o) => s + o.total, 0));
   const prevGmv = round(prev.reduce((s, o) => s + o.total, 0));
 
-  const plansById = Object.fromEntries(db.plans.map((p) => [p.id, p]));
-  const paying = db.stores.filter((s) => s.status === "active");
+  const plansById = Object.fromEntries(plans.map((p) => [p.id, p]));
+  const paying = stores.filter((s) => s.status === "active");
   const mrr = paying.reduce((s, st) => s + plansById[st.planId].priceMonthly, 0);
-  const storeById = Object.fromEntries(db.stores.map((s) => [s.id, s]));
+  const storeById = Object.fromEntries(stores.map((s) => [s.id, s]));
   const feeRevenue = round(curr.reduce((s, o) => s + (o.total * plansById[storeById[o.storeId].planId].feePercent) / 100, 0));
 
-  const perStore = db.stores
+  const perStore = stores
     .map((s) => {
       const mine = curr.filter((o) => o.storeId === s.id);
       const minePrev = prev.filter((o) => o.storeId === s.id);
@@ -795,16 +934,16 @@ export async function platformMetrics(days = 30) {
         gmv: g,
         orders: mine.length,
         growth: growth(g, minePrev.reduce((x, o) => x + o.total, 0)),
-        products: db.products.filter((p) => p.storeId === s.id).length,
+        products: productRows.filter((p) => p.store_id === s.id).length,
       };
     })
     .sort((a, b) => b.gmv - a.gmv);
 
   const statusCount = Object.fromEntries(
-    (["active", "trial", "suspended"] as StoreStatus[]).map((st) => [st, db.stores.filter((s) => s.status === st).length]),
+    (["active", "trial", "suspended"] as StoreStatus[]).map((st) => [st, stores.filter((s) => s.status === st).length]),
   ) as Record<StoreStatus, number>;
 
-  const planMix = db.plans.map((p) => ({ plan: p.name, stores: db.stores.filter((s) => s.planId === p.id).length }));
+  const planMix = plans.map((p) => ({ plan: p.name, stores: stores.filter((s) => s.planId === p.id).length }));
 
   return {
     gmv,
@@ -814,7 +953,7 @@ export async function platformMetrics(days = 30) {
     feeRevenue,
     orders: curr.length,
     ordersGrowth: growth(curr.length, prev.length),
-    stores: db.stores.length,
+    stores: stores.length,
     statusCount,
     planMix,
     perStore,
@@ -825,11 +964,9 @@ export async function platformMetrics(days = 30) {
 /* ------------------------------------------------------------------ Auditoria */
 
 export async function listAudit() {
-  return [...db.audit].sort((a, b) => b.at.localeCompare(a.at));
+  return (await run<Row[]>(sb().from("audit_logs").select("*").order("at", { ascending: false }).limit(500))).map((r) => fromRow<AuditLog>(r));
 }
 
 export async function log(actor: string, action: string, target: string) {
-  const entry: AuditLog = { id: uid("a"), at: new Date().toISOString(), actor, action, target };
-  db.audit.push(entry);
-  return entry;
+  return fromRow<AuditLog>(await run(sb().from("audit_logs").insert({ actor, action, target }).select().single()));
 }

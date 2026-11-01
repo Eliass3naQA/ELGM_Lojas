@@ -10,15 +10,20 @@ Plataforma web para lojas online com três visões:
 
 ## Rodando
 
+1. No SQL Editor do Supabase, rode `supabase/schema.sql` (tabelas, RLS, buckets e funções de checkout/estoque).
+2. Copie `.env.example` para `.env.local` e preencha com os dados de *Project Settings → API*.
+3. Instale e popule:
+
 ```bash
 npm install
+npm run db:seed    # dados de demonstração (só roda com o banco vazio)
 npm run dev        # http://localhost:3000
 ```
 
 Lojas de demonstração: `aurora-moda`, `cafe-do-ze`, `techlab`, `verde-vivo` (trial), `bike-urbana` (suspensa).
 Ex.: http://localhost:3000/aurora-moda/home e http://localhost:3000/aurora-moda/painel
 
-> Os dados ficam **em memória** e são recriados quando o servidor reinicia.
+> Os dados ficam no **Supabase** (Postgres + Storage). O backend usa a service role; nunca exponha `SUPABASE_SERVICE_ROLE_KEY` no navegador.
 
 ## Stack
 
@@ -48,7 +53,6 @@ GET  POST         /api/stores/{slug}/coupons
      PATCH DELETE /api/stores/{slug}/coupons/{id}
 POST              /api/stores/{slug}/coupons/check        (vitrine valida o cupom)
 POST              /api/stores/{slug}/uploads              (fotos; tipo conferido pelos bytes)
-GET               /api/files/{id}                         (fotos públicas)
 GET  POST         /api/stores/{slug}/orders          (POST = checkout)
      PATCH        /api/stores/{slug}/orders/{id}     (status / rastreio)
 POST              /api/stores/{slug}/orders/{id}/receipt   (comprador envia comprovante, multipart)
@@ -90,27 +94,28 @@ src/
   components/          UI, gráficos, sidebar, vitrine, painel, backoffice
   lib/
     types.ts           modelos de domínio
-    data/repository.ts ← ÚNICO ponto de acesso a dados (trocar por Supabase)
-    data/seed.ts       dados de exemplo
+    data/repository.ts ← ÚNICO ponto de acesso a dados (Supabase)
+    data/supabase.ts   client do servidor (service role)
+    data/seed.ts       dados de exemplo (usados por scripts/seed.ts)
     insights.ts        motor de insights (regras de negócio)
     auth/              sessão (cookie assinado) e provedores de login
     payments/          provider.ts (interface + modo manual) e pix.ts (BR Code)
     legal.ts           modelos de Termos de Uso e Política de Privacidade (LGPD)
     validation.ts      schemas Zod + tratamento de erros da API
-supabase/schema.sql    tabelas, enums e políticas RLS prontas
+supabase/schema.sql    tabelas, enums, RLS, buckets e funções SQL (create_order, cancel_order, adjust_stock)
+scripts/seed.ts        npm run db:seed
 ```
 
 Regras de negócio no backend: estoque validado e baixado no checkout (e devolvido ao cancelar), frete grátis por valor mínimo, transições de status controladas (`pending → paid → shipped → delivered`), envio exige rastreio, limite de produtos por plano, slugs reservados, loja suspensa não vende.
 
-## Conectando o Supabase (próximo passo)
+## Supabase
 
-1. Crie o projeto no Supabase e rode `supabase/schema.sql` no SQL Editor.
-2. `npm i @supabase/supabase-js @supabase/ssr` e crie `.env.local` com `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY`.
-3. Reimplemente as funções de `src/lib/data/repository.ts` usando o client, **mantendo as assinaturas**: páginas e API não precisam mudar.
-4. Auth do comprador: habilite Google, Azure (Microsoft) e Apple em *Authentication → Providers*; troque `LoginPanel` por `supabase.auth.signInWithOAuth()` e `lib/auth/session.ts` pela sessão do Supabase.
-5. Auth do lojista/backoffice: os pontos `TODO(auth)` indicam onde proteger o painel (dono da loja) e o backoffice (`platform_admins`). **Hoje o painel e o backoffice estão abertos.**
-6. Arquivos: trocar o armazenamento em memória pelos buckets `media` (público, fotos) e `receipts` (privado, comprovantes), já no schema.
-7. Checkout: transformar `createOrder` numa função SQL transacional (baixa de estoque + cupom + pedido numa só transação, com `select ... for update`).
+Já conectado: dados no Postgres, fotos no bucket público `media` e comprovantes no bucket privado `receipts`. Checkout, cancelamento e ajuste de estoque são funções SQL transacionais (`select ... for update`), sem risco de vender acima do estoque.
+
+Próximos passos:
+
+1. Auth do comprador: habilite Google, Azure (Microsoft) e Apple em *Authentication → Providers*; troque `LoginPanel` por `supabase.auth.signInWithOAuth()` e `lib/auth/session.ts` pela sessão do Supabase.
+2. Auth do lojista/backoffice: os pontos `TODO(auth)` indicam onde proteger o painel (dono da loja) e o backoffice (`platform_admins`). **Hoje o painel e o backoffice estão abertos.**
 
 ## Mercado Pago (próximo passo)
 

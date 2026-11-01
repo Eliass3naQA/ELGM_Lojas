@@ -42,3 +42,5 @@ next-env.d.ts
 
 # macOS AppleDouble metadata
 ._*
+
+!.env.example

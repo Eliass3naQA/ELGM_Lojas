@@ -1,7 +1,7 @@
 import type { ComponentProps, CSSProperties } from "react";
 import { cn } from "./ui";
 
-// As fotos vêm do nosso próprio /api/files (ou do Storage do Supabase no futuro);
+// As fotos vêm do bucket público "media" do Supabase Storage;
 // usamos <img> simples para não depender da configuração de domínios do next/image.
 export function Img(props: ComponentProps<"img">) {
   // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text
