@@ -55,6 +55,9 @@ export const storeUpdateSchema = z
       .nullable(),
     customTerms: z.string().max(20000).nullable(),
     // somente backoffice:
+    slug: z.string().min(3).max(40).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, "Use apenas letras minúsculas, números e hífens"),
+    ownerName: z.string().trim().min(2).max(80),
+    ownerEmail: z.string().trim().toLowerCase().email(),
     planId: z.enum(["starter", "pro", "enterprise"]),
     status: z.enum(["active", "trial", "suspended"]),
   })

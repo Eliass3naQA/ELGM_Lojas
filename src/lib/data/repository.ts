@@ -164,16 +164,52 @@ export async function createStore(input: Pick<Store, "slug" | "name" | "tagline"
   return toStore(row);
 }
 
-export async function updateStore(slug: string, patch: Partial<Omit<Store, "id" | "slug" | "createdAt">>, actor = "lojista") {
+export async function updateStore(slug: string, patch: Partial<Omit<Store, "id" | "createdAt">>, actor = "lojista") {
   const store = await requireStore(slug);
+  if (patch.slug === store.slug) delete patch.slug;
+  if (patch.slug) {
+    if (RESERVED_SLUGS.includes(patch.slug)) throw new DomainError("Este endereço é reservado.");
+    if (await getStoreBySlug(patch.slug)) throw new DomainError("Já existe uma loja com este endereço.", 409);
+  }
   const row = toRow(patch);
   // nova versão dos termos: clientes precisarão aceitar de novo na próxima compra
   if (patch.customTerms !== undefined && patch.customTerms !== store.customTerms) row.terms_updated_at = new Date().toISOString();
   if (!Object.keys(row).length) return store;
   const updated = toStore(await run(sb().from("stores").update(row).eq("id", store.id).select().single()));
-  if (patch.status) await log(actor, `Status alterado para ${patch.status}`, slug);
-  if (patch.planId) await log(actor, `Plano alterado para ${patch.planId}`, slug);
+  const target = updated.slug;
+  if (patch.slug) {
+    // mantém o histórico da auditoria ligado à loja
+    await run(sb().from("audit_logs").update({ target }).eq("target", slug));
+    await log(actor, `Endereço alterado de /${slug} para /${target}`, target);
+  }
+  if (patch.status) await log(actor, `Status alterado para ${patch.status}`, target);
+  if (patch.planId) await log(actor, `Plano alterado para ${patch.planId}`, target);
+  const labels: Partial<Record<keyof typeof patch, string>> = { name: "nome", tagline: "slogan", category: "categoria", logo: "logo", brandColor: "cor", ownerName: "responsável", ownerEmail: "e-mail", whatsapp: "WhatsApp" };
+  const changed = (Object.keys(labels) as (keyof typeof patch)[]).filter((k) => patch[k] !== undefined && patch[k] !== store[k]).map((k) => labels[k]);
+  if (actor === "admin" && changed.length) await log(actor, `Dados alterados: ${changed.join(", ")}`, target);
   return updated;
+}
+
+/** Remove todos os arquivos de uma pasta do Storage (inclusive subpastas). */
+async function removeFolder(bucket: string, prefix: string) {
+  for (;;) {
+    const { data, error } = await sb().storage.from(bucket).list(prefix, { limit: 1000 });
+    if (error) throw new Error(`Storage: ${error.message}`);
+    if (!data.length) return;
+    const files = data.filter((f) => f.id).map((f) => `${prefix}/${f.name}`);
+    for (const dir of data.filter((f) => !f.id)) await removeFolder(bucket, `${prefix}/${dir.name}`);
+    if (files.length) await sb().storage.from(bucket).remove(files);
+    if (data.length < 1000) return;
+  }
+}
+
+/** Exclui a loja e tudo dela: produtos, estoque, cupons, clientes, pedidos, pagamentos, fotos e comprovantes. */
+export async function deleteStore(slug: string, actor = "admin") {
+  const store = await requireStore(slug);
+  await removeFolder(MEDIA_BUCKET, store.id);
+  await removeFolder(RECEIPTS_BUCKET, store.id);
+  await run(sb().from("stores").delete().eq("id", store.id)); // o resto sai em cascata
+  await log(actor, `Loja excluída: ${store.name} (${store.ownerName})`, store.slug);
 }
 
 async function requireStore(slug: string) {

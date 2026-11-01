@@ -3,6 +3,7 @@ import { StoreLogo } from "@/components/media";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ExternalLink } from "lucide-react";
 import { StoreAdminActions } from "@/components/backoffice/store-admin-actions";
+import { DeleteStoreCard, StoreEditForm } from "@/components/backoffice/store-edit-form";
 import { RevenueChart } from "@/components/charts";
 import { ButtonLink, Card, CardHeader, InsightList, StatCard, StoreStatusBadge } from "@/components/ui";
 import { getPlan, getStoreBySlug, listAudit, listCustomers, listPlans, listProducts, storeMetrics } from "@/lib/data/repository";
@@ -63,6 +64,7 @@ export default async function StoreAdminPage({ params }: { params: Promise<{ slu
               <RevenueChart data={m.series} color={store.brandColor} />
             </div>
           </Card>
+          <StoreEditForm key={`${store.slug}:${store.ownerEmail}:${store.name}`} store={store} />
           <InsightList insights={insights} />
         </div>
         <div className="space-y-6">
@@ -84,6 +86,7 @@ export default async function StoreAdminPage({ params }: { params: Promise<{ slu
               </ul>
             )}
           </Card>
+          <DeleteStoreCard store={store} />
         </div>
       </div>
     </>
