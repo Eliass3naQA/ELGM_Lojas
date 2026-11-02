@@ -8,7 +8,7 @@ import { cn } from "../ui";
 
 const ACCEPT = "image/jpeg,image/png,image/webp";
 
-function useUploader(slug: string) {
+export function useUploader(slug: string) {
   const [busy, setBusy] = useState(0);
   const [error, setError] = useState<string | null>(null);
   async function upload(files: FileList | File[]) {

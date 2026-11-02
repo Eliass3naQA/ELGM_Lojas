@@ -110,6 +110,8 @@ function toProduct(r: Row): Product {
     category: r.category,
     image: r.image,
     images: r.images,
+    showcase: r.showcase ?? null,
+    specs: r.specs ?? [],
     active: r.active,
     createdAt: iso(r.created_at)!,
   };
@@ -252,6 +254,8 @@ export interface ProductInput {
   variants: (Omit<Variant, "id"> & { id?: string })[];
   image: string;
   images: string[];
+  showcase: Product["showcase"];
+  specs: Product["specs"];
   active: boolean;
 }
 
@@ -300,6 +304,8 @@ function productRow(input: ProductInput, stock: number) {
     options: input.options,
     image: input.image,
     images: input.images,
+    showcase: input.showcase,
+    specs: input.specs,
     active: input.active,
   };
 }

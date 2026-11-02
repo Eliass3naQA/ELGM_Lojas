@@ -76,6 +76,8 @@ create table products (
   category         text not null,
   image            text not null default '📦',
   images           text[] not null default '{}',              -- URLs do bucket "media"; a 1ª é a principal
+  showcase         jsonb,                                     -- showroom 360°: {views, headlights, intro}
+  specs            jsonb not null default '[]',               -- ficha técnica [{label, value}]
   active           boolean not null default true,
   created_at       timestamptz not null default now()
 );

@@ -50,7 +50,7 @@ async function main() {
       id: id(p.id), store_id: id(p.storeId), name: p.name, description: p.description, price: p.price,
       promo_price: p.promo?.price ?? null, promo_starts_at: p.promo?.startsAt ?? null, promo_ends_at: p.promo?.endsAt ?? null,
       sku: p.sku, track_stock: p.trackStock, stock: p.stock, low_stock_threshold: p.lowStockThreshold, options: p.options,
-      category: p.category, image: p.image, images: p.images, active: p.active, created_at: p.createdAt,
+      category: p.category, image: p.image, images: p.images, showcase: p.showcase, specs: p.specs, active: p.active, created_at: p.createdAt,
     })),
   );
 

@@ -5,7 +5,10 @@ import { ChevronLeft } from "lucide-react";
 import { ProductConfigurator } from "@/components/store/product-buy-box";
 import { ProductCard } from "@/components/store/product-card";
 import { getProduct, listProducts } from "@/lib/data/repository";
+import { Showroom } from "@/components/store/showroom";
 import { money } from "@/lib/format";
+import { fromPrice } from "@/lib/pricing";
+import { hasShowroom } from "@/lib/showcase";
 
 export default async function ProductPage({ params }: { params: Promise<{ loja: string; id: string }> }) {
   const { loja, id } = await params;
@@ -14,10 +17,24 @@ export default async function ProductPage({ params }: { params: Promise<{ loja: 
   if (!product || !product.active) notFound();
   const related = (await listProducts(store.id, { category: product.category })).filter((p) => p.id !== product.id).slice(0, 4);
   const now = Date.now();
-  const shippingText = store.freeShippingOver !== null ? `Frete grátis acima de ${money(store.freeShippingOver)}` : `Frete fixo de ${money(store.shippingFlat)}`;
+  const shippingText =
+    store.shippingFlat === 0 ? "Frete grátis" : store.freeShippingOver !== null ? `Frete grátis acima de ${money(store.freeShippingOver)}` : `Frete fixo de ${money(store.shippingFlat)}`;
+
+  const price = fromPrice(product, now);
 
   return (
     <main className="mx-auto max-w-7xl px-3 pt-4 sm:px-6 sm:pt-6">
+      {hasShowroom(product) && (
+        <Showroom
+          name={product.name}
+          eyebrow={product.category}
+          price={`${product.variants.some((v) => v.price !== null) ? "a partir de " : ""}${money(price.price)}`}
+          showcase={product.showcase}
+          specs={product.specs}
+          brand={store.brandColor}
+          className="mb-4 sm:mb-6"
+        />
+      )}
       <div className="glass-sheet rounded-[36px] p-3 sm:p-6">
         <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 px-1 sm:mb-5">
           <Link href={`/${loja}/home`} className="grid size-10 place-items-center rounded-full bg-white/70 text-zinc-600 shadow-sm transition hover:bg-white hover:text-zinc-900" aria-label="Voltar">

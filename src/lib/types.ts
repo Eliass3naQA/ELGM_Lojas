@@ -61,6 +61,23 @@ export interface Promo {
   endsAt: string | null;
 }
 
+// Showroom 360°: fotos do produto em volta dele. O sistema monta o giro a partir delas.
+export const SHOWCASE_RING = ["front", "frontRight", "right", "backRight", "back", "backLeft", "left", "frontLeft"] as const;
+export type ShowcaseRingView = (typeof SHOWCASE_RING)[number];
+export type ShowcaseView = ShowcaseRingView | "top" | "bottom";
+
+export interface Showcase {
+  views: Partial<Record<ShowcaseView, string>>; // URLs das fotos por ângulo
+  headlights: { x: number; y: number }[]; // posição dos faróis na foto da frente (% da imagem)
+  intro: boolean; // animação de chegada com os faróis piscando
+}
+
+// Ficha técnica livre (ex.: Ano: 2023 · Motor: 1.4 TSI).
+export interface Spec {
+  label: string;
+  value: string;
+}
+
 export interface Product {
   id: string;
   storeId: string;
@@ -77,6 +94,8 @@ export interface Product {
   category: string;
   image: string; // emoji — usado quando não há fotos
   images: string[]; // URLs das fotos; a primeira é a principal
+  showcase: Showcase | null;
+  specs: Spec[];
   active: boolean;
   createdAt: string;
 }

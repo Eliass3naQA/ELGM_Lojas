@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { Rotate3d } from "lucide-react";
 import { money } from "@/lib/format";
+import { hasShowroom } from "@/lib/showcase";
 import { availableStock, fromPrice, type PriceInfo } from "@/lib/pricing";
 import type { Product } from "@/lib/types";
 import { Img } from "../media";
@@ -23,6 +25,11 @@ export function ProductImage({ product, price, soldOut }: { product: Product; pr
         </>
       ) : (
         <span className="text-7xl transition duration-300 group-hover:scale-110">{product.image}</span>
+      )}
+      {hasShowroom(product) && (
+        <span className="absolute right-2.5 top-2.5 inline-flex items-center gap-1 rounded-full bg-zinc-950/80 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white shadow-lg backdrop-blur">
+          <Rotate3d className="size-3.5" /> 360°
+        </span>
       )}
       {price.onSale && <span className="absolute left-2.5 top-2.5 rounded-full bg-[var(--brand)] px-2.5 py-1 text-xs font-semibold text-white shadow-[0_6px_14px_-6px_var(--brand)]">-{price.discountPct}%</span>}
       {soldOut && (

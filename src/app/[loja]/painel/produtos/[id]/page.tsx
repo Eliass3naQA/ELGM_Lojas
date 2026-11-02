@@ -14,7 +14,7 @@ export default async function EditProductPage({ params }: { params: Promise<{ lo
   return (
     <>
       <PageHeader title="Editar produto" description={product.name} />
-      <ProductForm slug={store.slug} product={product} categories={categories} templates={optionTemplatesFor(store.category)} />
+      <ProductForm slug={store.slug} brand={store.brandColor} product={product} categories={categories} templates={optionTemplatesFor(store.category)} />
     </>
   );
 }

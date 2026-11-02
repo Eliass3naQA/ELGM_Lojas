@@ -2,15 +2,16 @@
 
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { Copy, Layers, Loader2, Plus, Sparkles, Tag, Trash2, X } from "lucide-react";
+import { Copy, Layers, ListChecks, Loader2, Plus, Rotate3d, Sparkles, Tag, Trash2, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import type { OptionTemplate } from "@/lib/catalog-templates";
 import { money } from "@/lib/format";
 import { combinations, priceOf, variantLabel } from "@/lib/pricing";
-import type { Product, ProductOption, Variant } from "@/lib/types";
+import type { Product, ProductOption, Showcase, Spec, Variant } from "@/lib/types";
 import { Thumb } from "../media";
 import { Badge, Button, Card, CardHeader, Field, Input, Textarea, cn } from "../ui";
 import { GalleryField } from "./image-fields";
+import { ShowcaseField, SpecsField } from "./showcase-field";
 
 const EMOJIS = ["📦", "👕", "👗", "👟", "👜", "🕶️", "☕", "🫘", "🎁", "⌨️", "🎧", "📷", "🔌", "🌿", "🪴", "🏺", "💄", "📚", "🧸", "🍫"];
 
@@ -60,7 +61,7 @@ function ValuesInput({ values, onChange }: { values: string[]; onChange: (v: str
   );
 }
 
-export function ProductForm({ slug, product, categories, templates }: { slug: string; product?: Product; categories: string[]; templates: OptionTemplate[] }) {
+export function ProductForm({ slug, brand, product, categories, templates }: { slug: string; brand: string; product?: Product; categories: string[]; templates: OptionTemplate[] }) {
   const router = useRouter();
   const [name, setName] = useState(product?.name ?? "");
   const [category, setCategory] = useState(product?.category ?? categories[0] ?? "");
@@ -78,6 +79,8 @@ export function ProductForm({ slug, product, categories, templates }: { slug: st
   const [options, setOptions] = useState<ProductOption[]>(product?.options ?? []);
   const [variants, setVariants] = useState<VariantDraft[]>(product?.variants ?? []);
   const [active, setActive] = useState(product?.active ?? true);
+  const [showcase, setShowcase] = useState<Showcase | null>(product?.showcase ?? null);
+  const [specs, setSpecs] = useState<Spec[]>(product?.specs ?? []);
   const [bulkStock, setBulkStock] = useState("");
   const [loading, setLoading] = useState<"save" | "delete" | "duplicate" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,6 +133,8 @@ export function ProductForm({ slug, product, categories, templates }: { slug: st
       variants,
       image: emoji,
       images,
+      showcase,
+      specs: specs.filter((s) => s.label.trim() && s.value.trim()),
       active,
     };
     try {
@@ -208,6 +213,20 @@ export function ProductForm({ slug, product, categories, templates }: { slug: st
                 </div>
               </div>
             )}
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title={<span className="flex items-center gap-2"><Rotate3d className="size-4 text-zinc-400" /> Showroom 360°</span>} description="Experiência imersiva na página do produto" />
+          <div className="p-5">
+            <ShowcaseField slug={slug} value={showcase} onChange={setShowcase} preview={{ name, brand, specs: specs.filter((s) => s.label.trim() && s.value.trim()) }} />
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title={<span className="flex items-center gap-2"><ListChecks className="size-4 text-zinc-400" /> Ficha técnica</span>} description="Aparece no showroom e na aba Detalhes" />
+          <div className="p-5">
+            <SpecsField value={specs} onChange={setSpecs} />
           </div>
         </Card>
 

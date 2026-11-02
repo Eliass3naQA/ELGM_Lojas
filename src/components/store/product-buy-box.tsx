@@ -99,6 +99,16 @@ export function ProductConfigurator({ product, now, shippingText }: { product: P
 
           {tab === "detalhes" && (
             <div>
+              {product.specs.length > 0 && (
+                <dl className="mb-5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-2xl bg-zinc-900/[0.04] p-4">
+                  {product.specs.map((s) => (
+                    <div key={s.label} className="min-w-0">
+                      <dt className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">{s.label}</dt>
+                      <dd className="truncate text-sm font-medium text-zinc-900" title={s.value}>{s.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
               <p className="whitespace-pre-line text-sm leading-relaxed text-zinc-600">{product.description || "Sem descrição."}</p>
               {(variant?.sku || product.sku) && <p className="mt-4 font-mono text-xs text-zinc-400">SKU {variant?.sku || product.sku}</p>}
             </div>

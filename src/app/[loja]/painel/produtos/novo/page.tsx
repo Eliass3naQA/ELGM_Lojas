@@ -12,7 +12,7 @@ export default async function NewProductPage({ params }: { params: Promise<{ loj
   return (
     <>
       <PageHeader title="Novo produto" />
-      <ProductForm slug={store.slug} categories={categories} templates={optionTemplatesFor(store.category)} />
+      <ProductForm slug={store.slug} brand={store.brandColor} categories={categories} templates={optionTemplatesFor(store.category)} />
     </>
   );
 }

@@ -272,6 +272,8 @@ export function buildSeed(): Db {
         category,
         image,
         images: [],
+        showcase: null,
+        specs: [],
         active: true,
         createdAt: new Date(now - (120 - pi * 5) * day).toISOString(),
       };

@@ -3,6 +3,7 @@ import { z, ZodError } from "zod";
 import { emailMatchesProvider } from "./auth/providers";
 import { formatCpf, isValidCpf, onlyDigits } from "./cpf";
 import { DomainError, mediaUrlPrefix } from "./data/repository";
+import { SHOWCASE_RING } from "./types";
 
 // mensagens de validação em português
 z.config(z.locales.pt());
@@ -93,6 +94,19 @@ export const productSchema = z.object({
     .default([]),
   image: z.string().min(1).max(8).default("📦"),
   images: z.array(imageUrl).max(10, "Máximo de 10 fotos por produto").default([]),
+  showcase: z
+    .object({
+      views: z.partialRecord(z.enum([...SHOWCASE_RING, "top", "bottom"]), imageUrl),
+      headlights: z.array(z.object({ x: z.number().min(0).max(100), y: z.number().min(0).max(100) })).max(4).default([]),
+      intro: z.boolean().default(true),
+    })
+    .nullable()
+    .default(null)
+    .refine((s) => !s || SHOWCASE_RING.filter((v) => s.views[v]).length >= 2, "O showroom 360° precisa de pelo menos 2 fotos ao redor do produto (ex.: frente e traseira)."),
+  specs: z
+    .array(z.object({ label: z.string().trim().min(1).max(40), value: z.string().trim().min(1).max(120) }))
+    .max(30, "Máximo de 30 itens na ficha técnica")
+    .default([]),
   active: z.boolean().default(true),
 });
 
