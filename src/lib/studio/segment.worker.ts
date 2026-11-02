@@ -6,11 +6,63 @@ import { AutoModel, AutoProcessor, env, RawImage, type PreTrainedModel, type Pro
 // Mesmo modelo (BiRefNet lite, MIT) em duas resoluções fixas:
 // - 1024 px na GPU: melhor recorte de bordas;
 // - 512 px no WASM: em 1024 px o WASM estoura o limite de 4 GB de memória (bad_alloc).
+// Os arquivos ficam no Storage do próprio projeto (bucket "models", publicado por `npm run models:upload`),
+// divididos em partes de 45 MB que são baixadas em paralelo. O Hugging Face fica só como reserva.
 const MODELS = {
-  webgpu: { id: "onnx-community/BiRefNet_lite-ONNX", dtype: "fp16" },
-  wasm: { id: "studioludens/birefnet-lite-512", dtype: "fp32" },
+  webgpu: { id: "birefnet-lite-1024", hf: "onnx-community/BiRefNet_lite-ONNX", dtype: "fp16" },
+  wasm: { id: "birefnet-lite-512", hf: "studioludens/birefnet-lite-512", dtype: "fp32" },
 } as const;
+const HOST = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/models/`;
 env.allowLocalModels = false;
+env.remoteHost = HOST;
+env.remotePathTemplate = "{model}/";
+env.fetch = fetchModelFile;
+
+/** Baixa um arquivo do modelo: partes em paralelo (com progresso) a partir do Storage; se falhar, do Hugging Face. */
+async function fetchModelFile(input: string | URL, init?: RequestInit): Promise<Response> {
+  const url = String(input);
+  if (!url.startsWith(HOST)) return fetch(input, init);
+  try {
+    if (!url.endsWith(".onnx")) {
+      const res = await fetch(url, init);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
+    }
+    const manifest = await fetch(`${url}.parts.json`, { cache: "no-store" });
+    if (!manifest.ok) throw new Error(`HTTP ${manifest.status}`);
+    const { parts, size } = (await manifest.json()) as { parts: number; size: number };
+    const loaded = new Array<number>(parts).fill(0);
+    let lastPost = 0;
+    const chunks = await Promise.all(
+      Array.from({ length: parts }, async (_, i) => {
+        const res = await fetch(`${url}.part${i}`);
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body.getReader();
+        const pieces: Uint8Array[] = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          pieces.push(value);
+          loaded[i] += value.length;
+          const now = Date.now();
+          if (now - lastPost > 250) {
+            lastPost = now;
+            post({ type: "progress", loaded: loaded.reduce((a, b) => a + b, 0), total: size });
+          }
+        }
+        return new Blob(pieces as BlobPart[]);
+      }),
+    );
+    post({ type: "progress", loaded: size, total: size });
+    return new Response(new Blob(chunks), { headers: { "content-type": "application/octet-stream", "content-length": String(size) } });
+  } catch {
+    // reserva: mesmo arquivo direto do Hugging Face
+    const [model, ...file] = url.slice(HOST.length).split("/");
+    const hf = Object.values(MODELS).find((m) => m.id === model)?.hf;
+    if (!hf) throw new Error(`Modelo desconhecido: ${model}`);
+    return fetch(`https://huggingface.co/${hf}/resolve/main/${file.join("/")}`, init);
+  }
+}
 
 // O BiRefNet usa shaders com 17 storage buffers; GPUs que suportam menos falham na execução.
 const MIN_STORAGE_BUFFERS = 17;
@@ -41,24 +93,24 @@ async function gpuUsable() {
   }
 }
 
+/** Motor de execução (ONNX Runtime WASM) também vem do Storage, publicado por `npm run models:upload`; senão, do CDN padrão. */
+async function useHostedRuntime() {
+  const onnx = env.backends.onnx as { versions?: { web?: string }; wasm?: { wasmPaths?: unknown } };
+  const version = onnx.versions?.web;
+  if (!version || !onnx.wasm) return;
+  const prefix = `${HOST}ort/${version}/`;
+  const ok = await fetch(`${prefix}ort-wasm-simd-threaded.asyncify.mjs`, { method: "HEAD" }).then((r) => r.ok, () => false);
+  if (ok) onnx.wasm.wasmPaths = prefix;
+}
+
 function load() {
   return (loading ??= (async () => {
+    await useHostedRuntime();
     const device: "webgpu" | "wasm" = (await gpuUsable()) ? "webgpu" : "wasm";
-    const files = new Map<string, { loaded: number; total: number }>();
-    const progress_callback = (p: { status: string; file?: string; loaded?: number; total?: number }) => {
-      if (p.status !== "progress" || !p.file) return;
-      files.set(p.file, { loaded: p.loaded ?? 0, total: p.total ?? 0 });
-      let loaded = 0;
-      let total = 0;
-      for (const f of files.values()) {
-        loaded += f.loaded;
-        total += f.total;
-      }
-      post({ type: "progress", loaded, total });
-    };
-    // download: ~115 MB (GPU, fp16) ou ~192 MB (WASM, fp32); depois fica no cache do navegador
+    // download: ~115 MB (GPU, fp16) ou ~192 MB (WASM, fp32); depois fica no cache do navegador.
+    // O progresso é informado pelo fetchModelFile, que baixa as partes.
     const { id, dtype } = MODELS[device];
-    const model = await AutoModel.from_pretrained(id, { device, dtype, progress_callback });
+    const model = await AutoModel.from_pretrained(id, { device, dtype });
     const processor = await AutoProcessor.from_pretrained(id, {});
     post({ type: "ready", device });
     return { model, processor, device };

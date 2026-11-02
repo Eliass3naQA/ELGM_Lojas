@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, Check, Crosshair, Eye, ImagePlus, ListChecks, Loader2, MousePointerClick, Plus, Rotate3d, Sparkles, Trash2, X } from "lucide-react";
 import { ringViews, SCENE_LABEL, VIEW_LABEL } from "@/lib/showcase";
-import { loadImage, onStudioEvent, originalToStage, processVehiclePhoto, rerenderCatalog, scenePreview, stageToOriginal, uploadPhoto, warmupStudio, type Kind, type Step } from "@/lib/studio/studio";
+import { loadImage, onStudioEvent, originalToStage, processVehiclePhoto, rerenderCatalog, resetStudio, scenePreview, stageToOriginal, uploadPhoto, warmupStudio, type Kind, type Step } from "@/lib/studio/studio";
 import { HOTSPOT_KINDS, STUDIO_SCENES, type Hotspot, type HotspotKind, type Showcase, type ShowcaseRingView, type ShowcaseSource, type ShowcaseView, type Spec, type StudioScene } from "@/lib/types";
 import { Img } from "../media";
 import { HOTSPOT_META } from "../store/hotspot-kinds";
@@ -155,10 +155,17 @@ function StudioPicker({ scene, onChange, brand, logoUrl, model }: { scene: Studi
           {model.ready ? (
             <span className="text-emerald-600">IA de recorte pronta {model.device === "webgpu" ? "(acelerada pela placa de vídeo)" : "(modo compatível: cada foto leva mais tempo)"}.</span>
           ) : model.error ? (
-            <span className="text-red-600">Não foi possível carregar a IA de recorte: {model.error}</span>
+            <span className="flex flex-wrap items-center gap-2 text-red-600">
+              {model.error}
+              <button type="button" onClick={model.retry} className="rounded-full border border-red-200 px-2.5 py-0.5 font-medium hover:bg-red-50">
+                Tentar de novo
+              </button>
+            </span>
           ) : (
             <div>
-              <p>Baixando a IA de recorte (só na primeira vez; depois fica guardada no navegador)…</p>
+              <p>
+                Baixando a IA de recorte{model.total ? `: ${Math.round(model.loaded / 1e6)} de ${Math.round(model.total / 1e6)} MB` : "…"} · só na primeira vez, depois fica guardada no navegador
+              </p>
               <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-100">
                 <div className="h-full bg-zinc-900 transition-[width]" style={{ width: `${model.total ? Math.round((model.loaded / model.total) * 100) : 3}%` }} />
               </div>
@@ -170,21 +177,41 @@ function StudioPicker({ scene, onChange, brand, logoUrl, model }: { scene: Studi
   );
 }
 
-type ModelState = { ready: boolean; device: string | null; loaded: number; total: number; error: string | null };
+type ModelState = { ready: boolean; device: string | null; loaded: number; total: number; error: string | null; retry: () => void };
+
+const STALL_MS = 45_000; // sem nenhum avanço no download por esse tempo = travou
 
 function useStudioModel(active: boolean) {
-  const [state, setState] = useState<ModelState>({ ready: false, device: null, loaded: 0, total: 0, error: null });
+  const [state, setState] = useState<Omit<ModelState, "retry">>({ ready: false, device: null, loaded: 0, total: 0, error: null });
+  const lastActivity = useRef(Date.now());
   useEffect(() => {
     if (!active) return;
+    lastActivity.current = Date.now();
     const off = onStudioEvent((e) => {
-      if (e.type === "progress") setState((s) => ({ ...s, loaded: e.loaded, total: e.total }));
+      lastActivity.current = Date.now();
+      if (e.type === "progress") setState((s) => ({ ...s, loaded: e.loaded, total: e.total, error: null }));
       else if (e.type === "ready") setState((s) => ({ ...s, ready: true, device: e.device, error: null }));
       else if (e.type === "error" && e.id === null) setState((s) => ({ ...s, error: e.message }));
     });
     warmupStudio();
-    return off;
+    // vigia: download parado (depois de baixar, a preparação do modelo leva alguns segundos sem avisos)
+    const timer = setInterval(() => {
+      setState((s) => {
+        const downloading = !s.ready && !s.error && (!s.total || s.loaded < s.total);
+        return downloading && Date.now() - lastActivity.current > STALL_MS ? { ...s, error: "O download da IA de recorte parou. Verifique a conexão e tente de novo." } : s;
+      });
+    }, 5000);
+    return () => {
+      off();
+      clearInterval(timer);
+    };
   }, [active]);
-  return state;
+  const retry = () => {
+    lastActivity.current = Date.now();
+    setState({ ready: false, device: null, loaded: 0, total: 0, error: null });
+    resetStudio();
+  };
+  return { ...state, retry };
 }
 
 // ---------------------------------------------------------------- pontos interativos

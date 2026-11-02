@@ -57,6 +57,15 @@ export function onStudioEvent(listener: (e: SegmentEvent) => void) {
   return () => void listeners.delete(listener);
 }
 
+/** Descarta o worker (ex.: download travado) e começa de novo; fotos na fila precisam ser reenviadas. */
+export function resetStudio() {
+  worker?.terminate();
+  worker = null;
+  pending.forEach((p) => p.reject(new Error("O estúdio foi reiniciado. Envie a foto de novo.")));
+  pending.clear();
+  warmupStudio();
+}
+
 /** Começa a baixar o modelo antes da primeira foto (ex.: quando o vendedor liga o estúdio). */
 export function warmupStudio() {
   getWorker().postMessage({ warmup: true });
