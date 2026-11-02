@@ -72,16 +72,16 @@ export function Showroom({
   const carRef = useRef<HTMLDivElement>(null);
   const roadRef = useRef<HTMLDivElement>(null);
   const miniRef = useRef<SVGGElement>(null);
+  const hudRef = useRef<HTMLDivElement>(null);
   const layerEls = useRef(new Map<string, HTMLDivElement>()); // `${key}` e `${key}:refl`
 
   const [ratios, setRatios] = useState<Record<string, number>>({});
   const [loaded, setLoaded] = useState(0);
   const ready = loaded >= layers.length;
-  const [hud, setHud] = useState(false);
   const [interacted, setInteracted] = useState(false);
   const [playing, setPlaying] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
-  const [active, setActive] = useState<ShowcaseView>(ring[0]?.key ?? "front");
+  const pillEls = useRef(new Map<string, HTMLButtonElement>()); // botões das vistas (destaque atualizado pelo loop)
   const [elevation, setElevation] = useState<0 | 90 | -90>(0);
 
   const sim = useRef({
@@ -129,6 +129,12 @@ export function Showroom({
     };
   }, [layers]);
 
+  // HUD (nome, controles) controlado direto no DOM, como o resto da animação
+  const showHud = useCallback((on: boolean) => {
+    sim.current.hudShown = on;
+    if (hudRef.current) hudRef.current.style.opacity = on ? "1" : "0";
+  }, []);
+
   const reduced = useRef(false);
   useEffect(() => {
     reduced.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -142,14 +148,13 @@ export function Showroom({
       s.turn = 1;
       s.hl = s.hlTarget = 0;
       s.lastInteract = performance.now();
-      s.hudShown = true;
-      setHud(true);
+      showHud(true);
       return;
     }
-    Object.assign(s, { introStart: performance.now(), introDone: false, theta: 0, phi: 0, phiTarget: 0, vel: 0, target: null, zoomTarget: 1, arrive: 0, turn: 0, hudShown: false });
-    setHud(false);
+    Object.assign(s, { introStart: performance.now(), introDone: false, theta: 0, phi: 0, phiTarget: 0, vel: 0, target: null, zoomTarget: 1, arrive: 0, turn: 0 });
+    showHud(false);
     setElevation(0);
-  }, [showcase.intro]);
+  }, [showcase.intro, showHud]);
 
   /** Interrompe a chegada e deixa o produto no lugar, pronto para girar. */
   const skipIntro = useCallback(() => {
@@ -160,11 +165,8 @@ export function Showroom({
     s.arrive = 1;
     s.turn = 1;
     s.hlTarget = 0;
-    if (!s.hudShown) {
-      s.hudShown = true;
-      setHud(true);
-    }
-  }, []);
+    if (!s.hudShown) showHud(true);
+  }, [showHud]);
 
   useEffect(() => {
     if (ready) startIntro();
@@ -261,7 +263,7 @@ export function Showroom({
       const current = topW > 0.5 ? "top" : botW > 0.5 ? "bottom" : (w < 0.5 ? ring[a] : ring[b]).key;
       if (current !== s.active) {
         s.active = current;
-        setActive(current);
+        for (const [v, el] of pillEls.current) el.dataset.active = v === current ? "1" : "0";
       }
     };
 
@@ -278,10 +280,7 @@ export function Showroom({
         s.roadY += (1 - s.arrive) * 2600 * dt;
         s.turn = smooth(clamp((t - ARRIVE + 200) / 900));
         s.hl = headlightsAt(t);
-        if (t > FLASH && !s.hudShown) {
-          s.hudShown = true;
-          setHud(true);
-        }
+        if (t > FLASH && !s.hudShown) showHud(true);
         if (t > SPIN_AT) {
           const p = clamp((t - SPIN_AT) / SPIN);
           s.theta = 360 * easeInOut(p);
@@ -316,7 +315,7 @@ export function Showroom({
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [ready, ring, layers, hasTop, hasBottom]);
+  }, [ready, ring, layers, hasTop, hasBottom, showHud]);
 
   // ---------------------------------------------------------------- interação
   const interact = () => {
@@ -433,7 +432,6 @@ export function Showroom({
   };
 
   const viewButtons: ShowcaseView[] = [...ring.map((l) => l.key), ...(hasTop ? ["top" as const] : []), ...(hasBottom ? ["bottom" as const] : [])];
-  const isActive = (v: ShowcaseView) => active === v;
   const glassBtn = "grid size-10 place-items-center rounded-full border border-white/15 bg-white/[0.07] text-white/85 backdrop-blur-md transition hover:bg-white/15 hover:text-white";
 
   return (
@@ -469,6 +467,7 @@ export function Showroom({
         }}
         className="absolute inset-x-[4%] bottom-[24%] top-[17%] cursor-grab touch-pan-y active:cursor-grabbing sm:inset-x-[10%]"
       >
+        <div className="showroom-turntable" />
         <div ref={carRef} className="absolute inset-0 origin-[50%_85%] [perspective:1600px]" style={{ transform: "scale(0.14)" }}>
           <div className="showroom-shadow" />
           {layers.map((l) => renderLayer(l, false))}
@@ -481,7 +480,7 @@ export function Showroom({
       <div className="showroom-bloom" />
 
       {/* HUD */}
-      <div className={cn("pointer-events-none absolute inset-0 transition-opacity duration-1000", hud ? "opacity-100" : "opacity-0")}>
+      <div ref={hudRef} className="pointer-events-none absolute inset-0 transition-opacity duration-1000" style={{ opacity: 0 }}>
         <div className="flex items-start justify-between gap-4 p-5 sm:p-8">
           <div className="max-w-xl">
             <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/80 backdrop-blur-md">
@@ -506,7 +505,7 @@ export function Showroom({
 
         {/* ficha técnica */}
         {specs.length > 0 && (
-          <dl className="absolute right-8 top-1/2 hidden w-60 -translate-y-1/2 space-y-3 rounded-3xl border border-white/10 bg-white/[0.04] p-5 backdrop-blur-md xl:block">
+          <dl className="absolute bottom-6 right-6 hidden w-[300px] grid-cols-2 gap-x-5 gap-y-3 rounded-3xl border border-white/10 bg-white/[0.04] p-5 backdrop-blur-md xl:grid">
             {specs.slice(0, 6).map((s) => (
               <div key={s.label}>
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/45">{s.label}</dt>
@@ -527,7 +526,7 @@ export function Showroom({
             <button type="button" onClick={() => zoom(-1)} className={glassBtn} aria-label="Afastar">
               <Minus className="size-4" />
             </button>
-            <div className="relative grid size-[74px] place-items-center rounded-full border border-white/15 bg-white/[0.05] backdrop-blur-md" title={VIEW_LABEL[active]}>
+            <div className="relative grid size-[74px] place-items-center rounded-full border border-white/15 bg-white/[0.05] backdrop-blur-md">
               <svg viewBox="-50 -50 100 100" className="size-full">
                 {Array.from({ length: 24 }, (_, i) => (
                   <line key={i} x1="0" y1="-44" x2="0" y2={i % 6 === 0 ? -37 : -40} stroke="white" strokeOpacity={i % 6 === 0 ? 0.5 : 0.2} strokeWidth="1.5" transform={`rotate(${i * 15})`} />
@@ -548,9 +547,14 @@ export function Showroom({
             {viewButtons.map((v) => (
               <button
                 key={v}
+                ref={(el) => {
+                  if (el) pillEls.current.set(v, el);
+                  else pillEls.current.delete(v);
+                }}
                 type="button"
                 onClick={() => goTo(v)}
-                className={cn("whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition", isActive(v) ? "bg-white text-zinc-950" : "text-white/70 hover:text-white")}
+                data-active={v === ring[0]?.key ? "1" : "0"}
+                className="whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium text-white/70 transition hover:text-white data-[active=1]:bg-white data-[active=1]:text-zinc-950"
               >
                 {VIEW_SHORT[v]}
               </button>

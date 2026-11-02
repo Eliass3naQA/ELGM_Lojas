@@ -222,13 +222,14 @@ body {
   filter: blur(14px);
   opacity: calc(0.25 + var(--turn) * 0.75);
 }
+/* pista em perspectiva: o horizonte fica ~perspective × cot(ângulo) acima da base */
 .showroom-road {
   position: absolute;
-  left: -60%;
-  right: -60%;
-  bottom: -35%;
-  height: 95%;
-  transform: perspective(520px) rotateX(74deg);
+  left: -100%;
+  right: -100%;
+  bottom: 0;
+  height: 300%;
+  transform: perspective(700px) rotateX(60deg);
   transform-origin: 50% 100%;
   background-image:
     repeating-linear-gradient(to bottom, rgb(255 255 255 / 0.75) 0 70px, transparent 70px 160px),
@@ -246,14 +247,14 @@ body {
   height: 46%;
   background: linear-gradient(to bottom, transparent, rgb(0 0 0 / 0.6));
 }
-/* plataforma giratória que aparece quando o carro estaciona */
-.showroom-floor::before {
-  content: "";
+/* plataforma giratória (dentro do palco, sob o carro) que aparece quando ele estaciona */
+.showroom-turntable {
   position: absolute;
   left: 50%;
-  bottom: 24%;
-  width: min(84%, 1040px);
+  bottom: 0;
+  width: 112%;
   aspect-ratio: 5 / 1;
+  pointer-events: none;
   translate: -50% 50%;
   border-radius: 50%;
   background: radial-gradient(closest-side, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.02) 70%, transparent);
