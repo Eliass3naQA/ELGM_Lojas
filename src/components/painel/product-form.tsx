@@ -12,6 +12,8 @@ import { Thumb } from "../media";
 import { Badge, Button, Card, CardHeader, Field, Input, Textarea, cn } from "../ui";
 import { GalleryField } from "./image-fields";
 import { ShowcaseField, SpecsField } from "./showcase-field";
+import { VehicleAssistant } from "./vehicle-assistant";
+import type { VehicleSuggestion } from "@/lib/ai/vehicle-specs";
 
 const EMOJIS = ["📦", "👕", "👗", "👟", "👜", "🕶️", "☕", "🫘", "🎁", "⌨️", "🎧", "📷", "🔌", "🌿", "🪴", "🏺", "💄", "📚", "🧸", "🍫"];
 
@@ -61,7 +63,23 @@ function ValuesInput({ values, onChange }: { values: string[]; onChange: (v: str
   );
 }
 
-export function ProductForm({ slug, brand, product, categories, templates }: { slug: string; brand: string; product?: Product; categories: string[]; templates: OptionTemplate[] }) {
+export function ProductForm({
+  slug,
+  brand,
+  logoUrl,
+  vehicles,
+  product,
+  categories,
+  templates,
+}: {
+  slug: string;
+  brand: string;
+  logoUrl: string | null;
+  vehicles: boolean; // loja de veículos: mostra o assistente de cadastro com IA
+  product?: Product;
+  categories: string[];
+  templates: OptionTemplate[];
+}) {
   const router = useRouter();
   const [name, setName] = useState(product?.name ?? "");
   const [category, setCategory] = useState(product?.category ?? categories[0] ?? "");
@@ -80,6 +98,37 @@ export function ProductForm({ slug, brand, product, categories, templates }: { s
   const [variants, setVariants] = useState<VariantDraft[]>(product?.variants ?? []);
   const [active, setActive] = useState(product?.active ?? true);
   const [showcase, setShowcase] = useState<Showcase | null>(product?.showcase ?? null);
+  const [description, setDescription] = useState(product?.description ?? "");
+
+  /** Aplica a sugestão da IA sem apagar o que o vendedor já preencheu. Devolve um resumo para mostrar. */
+  function applySuggestion(sug: VehicleSuggestion) {
+    const done: string[] = [];
+    if (!name.trim()) {
+      setName(sug.name);
+      done.push("nome");
+    }
+    setCategory(sug.category);
+    done.push("categoria");
+    const filled = new Map(specs.filter((x) => x.value.trim()).map((x) => [x.label.trim().toLowerCase(), x]));
+    const merged = [...specs.filter((x) => x.label.trim())];
+    let added = 0;
+    for (const item of sug.specs) {
+      const key = item.label.toLowerCase();
+      if (filled.has(key)) continue; // não sobrescreve o que já foi preenchido
+      const i = merged.findIndex((x) => x.label.trim().toLowerCase() === key);
+      if (i >= 0) merged[i] = item;
+      else merged.push(item);
+      added++;
+    }
+    setSpecs(merged);
+    if (added) done.push(`${added} itens da ficha técnica`);
+    if (!description.trim()) {
+      const equipment = sug.equipment.length ? `\n\nItens de série:\n${sug.equipment.map((e) => `• ${e}`).join("\n")}` : "";
+      setDescription(sug.description + equipment);
+      done.push(`descrição${sug.equipment.length ? ` com ${sug.equipment.length} itens de série` : ""}`);
+    }
+    return `Preenchido: ${done.join(", ")}.`;
+  }
   const [specs, setSpecs] = useState<Spec[]>(product?.specs ?? []);
   const [bulkStock, setBulkStock] = useState("");
   const [loading, setLoading] = useState<"save" | "delete" | "duplicate" | null>(null);
@@ -114,7 +163,6 @@ export function ProductForm({ slug, brand, product, categories, templates }: { s
 
   async function save(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const description = String(new FormData(e.currentTarget).get("description") ?? "");
     setError(null);
     if (!(num(price) > 0)) return setError("Informe o preço.");
     if (promoOn && !(num(promoPrice) > 0)) return setError("Informe o preço promocional.");
@@ -172,6 +220,7 @@ export function ProductForm({ slug, brand, product, categories, templates }: { s
   return (
     <form onSubmit={save} className="grid gap-6 lg:grid-cols-3">
       <div className="space-y-6 lg:col-span-2">
+        {vehicles && <VehicleAssistant slug={slug} onApply={applySuggestion} />}
         <Card>
           <CardHeader title="Informações" />
           <div className="space-y-4 p-5">
@@ -179,7 +228,7 @@ export function ProductForm({ slug, brand, product, categories, templates }: { s
               <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Camiseta Básica Algodão" />
             </Field>
             <Field label="Descrição">
-              <Textarea name="description" defaultValue={product?.description} placeholder="Materiais, medidas, modo de uso, diferenciais…" className="min-h-32" />
+              <Textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Materiais, medidas, modo de uso, diferenciais…" className="min-h-32" />
             </Field>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Categoria">
@@ -219,7 +268,13 @@ export function ProductForm({ slug, brand, product, categories, templates }: { s
         <Card>
           <CardHeader title={<span className="flex items-center gap-2"><Rotate3d className="size-4 text-zinc-400" /> Showroom 360°</span>} description="Experiência imersiva na página do produto" />
           <div className="p-5">
-            <ShowcaseField slug={slug} value={showcase} onChange={setShowcase} preview={{ name, brand, specs: specs.filter((s) => s.label.trim() && s.value.trim()) }} />
+            <ShowcaseField
+              slug={slug}
+              value={showcase}
+              onChange={setShowcase}
+              preview={{ name, brand, logoUrl, specs: specs.filter((s) => s.label.trim() && s.value.trim()) }}
+              onUseCatalogPhotos={(urls) => setImages((prev) => [...urls, ...prev.filter((u) => !urls.includes(u))].slice(0, 10))}
+            />
           </div>
         </Card>
 

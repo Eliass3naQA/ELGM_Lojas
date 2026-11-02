@@ -66,10 +66,42 @@ export const SHOWCASE_RING = ["front", "frontRight", "right", "backRight", "back
 export type ShowcaseRingView = (typeof SHOWCASE_RING)[number];
 export type ShowcaseView = ShowcaseRingView | "top" | "bottom";
 
+// Cenários do estúdio fotográfico (o veículo é recortado da foto e aplicado sobre eles).
+export const STUDIO_SCENES = ["dark", "beige", "white", "brand", "logo"] as const;
+export type StudioScene = (typeof STUDIO_SCENES)[number];
+
+/** Arquivos de origem de uma vista: foto original, recorte (PNG transparente) e versão quadrada para o catálogo. */
+export interface ShowcaseSource {
+  original: string;
+  cutout: string | null;
+  stage?: string | null; // veículo enquadrado sem fundo (imagem do showroom quando o estúdio está ligado)
+  square: string | null;
+  // onde o veículo estava na foto original (px), para converter pontos marcados entre a foto e o estúdio
+  frame?: { w: number; h: number; x: number; y: number; cw: number; ch: number } | null;
+}
+
+export const HOTSPOT_KINDS = ["engine", "wheels", "interior", "trunk", "dashboard", "lights", "custom"] as const;
+export type HotspotKind = (typeof HOTSPOT_KINDS)[number];
+
+/** Ponto clicável sobre uma foto do giro, que abre fotos reais de um detalhe (motor, pneus, interior…). */
+export interface Hotspot {
+  id: string;
+  view: ShowcaseRingView;
+  x: number; // % da foto
+  y: number;
+  kind: HotspotKind;
+  label: string;
+  note: string;
+  photos: string[];
+}
+
 export interface Showcase {
   views: Partial<Record<ShowcaseView, string>>; // URLs das fotos por ângulo
   headlights: { x: number; y: number }[]; // posição dos faróis na foto da frente (% da imagem)
   intro: boolean; // animação de chegada com os faróis piscando
+  studio?: StudioScene | null; // cenário aplicado a todas as vistas (null = fotos como enviadas)
+  sources?: Partial<Record<ShowcaseView, ShowcaseSource>>;
+  hotspots?: Hotspot[];
 }
 
 // Ficha técnica livre (ex.: Ano: 2023 · Motor: 1.4 TSI).

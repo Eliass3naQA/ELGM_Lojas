@@ -3,7 +3,7 @@ import { z, ZodError } from "zod";
 import { emailMatchesProvider } from "./auth/providers";
 import { formatCpf, isValidCpf, onlyDigits } from "./cpf";
 import { DomainError, mediaUrlPrefix } from "./data/repository";
-import { SHOWCASE_RING } from "./types";
+import { HOTSPOT_KINDS, SHOWCASE_RING, STUDIO_SCENES } from "./types";
 
 // mensagens de validação em português
 z.config(z.locales.pt());
@@ -99,6 +99,37 @@ export const productSchema = z.object({
       views: z.partialRecord(z.enum([...SHOWCASE_RING, "top", "bottom"]), imageUrl),
       headlights: z.array(z.object({ x: z.number().min(0).max(100), y: z.number().min(0).max(100) })).max(4).default([]),
       intro: z.boolean().default(true),
+      studio: z.enum(STUDIO_SCENES).nullable().default(null),
+      sources: z
+        .partialRecord(
+          z.enum([...SHOWCASE_RING, "top", "bottom"]),
+          z.object({
+            original: imageUrl,
+            cutout: imageUrl.nullable(),
+            stage: imageUrl.nullable().default(null),
+            square: imageUrl.nullable(),
+            frame: z
+              .object({ w: z.number().positive(), h: z.number().positive(), x: z.number().min(0), y: z.number().min(0), cw: z.number().positive(), ch: z.number().positive() })
+              .nullable()
+              .default(null),
+          }),
+        )
+        .default({}),
+      hotspots: z
+        .array(
+          z.object({
+            id: z.string().min(1).max(40),
+            view: z.enum(SHOWCASE_RING),
+            x: z.number().min(0).max(100),
+            y: z.number().min(0).max(100),
+            kind: z.enum(HOTSPOT_KINDS),
+            label: z.string().trim().min(1, "Dê um nome ao ponto interativo").max(40),
+            note: z.string().trim().max(500).default(""),
+            photos: z.array(imageUrl).max(12, "Máximo de 12 fotos por ponto").default([]),
+          }),
+        )
+        .max(16, "Máximo de 16 pontos interativos")
+        .default([]),
     })
     .nullable()
     .default(null)

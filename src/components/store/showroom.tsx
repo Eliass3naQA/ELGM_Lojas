@@ -1,15 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Hand, Maximize2, Minimize2, Minus, Pause, Play, Plus, Sparkles } from "lucide-react";
-import { ringViews, VIEW_ANGLE, VIEW_LABEL, VIEW_SHORT } from "@/lib/showcase";
-import type { Showcase, ShowcaseRingView, ShowcaseView, Spec } from "@/lib/types";
+import { ChevronLeft, ChevronRight, Hand, Maximize2, Minimize2, Minus, Pause, Play, Plus, Sparkles, X } from "lucide-react";
+import { isLightScene, ringViews, VIEW_ANGLE, VIEW_LABEL, VIEW_SHORT } from "@/lib/showcase";
+import type { Hotspot, Showcase, ShowcaseRingView, ShowcaseView, Spec } from "@/lib/types";
 import { cn } from "../ui";
+import { HOTSPOT_META } from "./hotspot-kinds";
 
 // Showroom 360°: monta um giro contínuo a partir das fotos de cada ângulo.
 // Entre duas fotos vizinhas, as imagens se cruzam com inclinação 3D, compressão e
 // desfoque de movimento, o que dá a sensação de o produto estar girando.
 // As vistas de cima/baixo giram de verdade (rotação 2D da foto aérea).
+// Pontos interativos ficam presos à foto em que foram marcados e abrem fotos reais do detalhe.
 // A animação roda num loop de requestAnimationFrame que escreve direto no DOM.
 
 type Layer = { key: ShowcaseView; url: string; angle: number | null };
@@ -26,6 +28,7 @@ const ARRIVE = 2600;
 const FLASH = 2750;
 const SPIN_AT = 4300;
 const SPIN = 6200;
+const MAX_ZOOM = 3;
 
 /** Intensidade dos faróis durante a chegada: acesos, piscam duas vezes (farol alto) e baixam. */
 function headlightsAt(t: number) {
@@ -45,6 +48,7 @@ export function Showroom({
   showcase,
   specs = [],
   brand,
+  logoUrl = null,
   className,
 }: {
   name: string;
@@ -53,6 +57,7 @@ export function Showroom({
   showcase: Showcase;
   specs?: Spec[];
   brand: string;
+  logoUrl?: string | null;
   className?: string;
 }) {
   const ring = useMemo<Layer[]>(() => ringViews(showcase).map((v) => ({ key: v, url: showcase.views[v]!, angle: VIEW_ANGLE[v] })), [showcase]);
@@ -66,6 +71,8 @@ export function Showroom({
   );
   const hasTop = !!showcase.views.top;
   const hasBottom = !!showcase.views.bottom;
+  const hotspots = useMemo(() => (showcase.hotspots ?? []).filter((h) => showcase.views[h.view]), [showcase]);
+  const light = isLightScene(showcase.studio);
 
   const rootRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -74,6 +81,7 @@ export function Showroom({
   const miniRef = useRef<SVGGElement>(null);
   const hudRef = useRef<HTMLDivElement>(null);
   const layerEls = useRef(new Map<string, HTMLDivElement>()); // `${key}` e `${key}:refl`
+  const pillEls = useRef(new Map<string, HTMLButtonElement>()); // botões das vistas (destaque atualizado pelo loop)
 
   const [ratios, setRatios] = useState<Record<string, number>>({});
   const [loaded, setLoaded] = useState(0);
@@ -81,8 +89,8 @@ export function Showroom({
   const [interacted, setInteracted] = useState(false);
   const [playing, setPlaying] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
-  const pillEls = useRef(new Map<string, HTMLButtonElement>()); // botões das vistas (destaque atualizado pelo loop)
   const [elevation, setElevation] = useState<0 | 90 | -90>(0);
+  const [detail, setDetail] = useState<{ hotspot: Hotspot; photo: number } | null>(null);
 
   const sim = useRef({
     theta: 0,
@@ -91,8 +99,12 @@ export function Showroom({
     vel: 0,
     zoom: 1,
     zoomTarget: 1,
+    panX: 0,
+    panY: 0,
     target: null as number | null,
-    dragging: false,
+    pointers: new Map<number, { x: number; y: number }>(),
+    mode: "none" as "none" | "rotate" | "pan" | "pinch",
+    pinch: { dist: 0, zoom: 1, mx: 0, my: 0 },
     lastX: 0,
     lastY: 0,
     lastT: 0,
@@ -105,6 +117,7 @@ export function Showroom({
     turn: 1,
     roadY: 0,
     playing: true,
+    paused: false, // painel de detalhe aberto
     visible: true,
     active: "" as string,
     hudShown: false,
@@ -129,10 +142,11 @@ export function Showroom({
     };
   }, [layers]);
 
-  // HUD (nome, controles) controlado direto no DOM, como o resto da animação
+  // HUD (nome, controles, pontos) controlado direto no DOM, como o resto da animação
   const showHud = useCallback((on: boolean) => {
     sim.current.hudShown = on;
     if (hudRef.current) hudRef.current.style.opacity = on ? "1" : "0";
+    if (rootRef.current) rootRef.current.dataset.hud = on ? "1" : "0";
   }, []);
 
   const reduced = useRef(false);
@@ -151,7 +165,7 @@ export function Showroom({
       showHud(true);
       return;
     }
-    Object.assign(s, { introStart: performance.now(), introDone: false, theta: 0, phi: 0, phiTarget: 0, vel: 0, target: null, zoomTarget: 1, arrive: 0, turn: 0 });
+    Object.assign(s, { introStart: performance.now(), introDone: false, theta: 0, phi: 0, phiTarget: 0, vel: 0, target: null, zoomTarget: 1, panX: 0, panY: 0, arrive: 0, turn: 0 });
     showHud(false);
     setElevation(0);
   }, [showcase.intro, showHud]);
@@ -176,6 +190,10 @@ export function Showroom({
     sim.current.playing = playing;
   }, [playing]);
 
+  useEffect(() => {
+    sim.current.paused = !!detail;
+  }, [detail]);
+
   // pausa o loop fora da tela
   useEffect(() => {
     const el = rootRef.current;
@@ -189,6 +207,21 @@ export function Showroom({
     const onFs = () => setFullscreen(document.fullscreenElement === rootRef.current);
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  // zoom com a roda do mouse: só com Ctrl (ou pinça do trackpad) ou em tela cheia, para não roubar a rolagem da página
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey && document.fullscreenElement !== rootRef.current) return;
+      e.preventDefault();
+      const s = sim.current;
+      s.zoomTarget = clamp(s.zoomTarget * Math.exp(-e.deltaY * 0.004), 1, MAX_ZOOM);
+      s.lastInteract = performance.now();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
   // loop de animação
@@ -245,21 +278,25 @@ export function Showroom({
           el.style.visibility = o < 0.003 ? "hidden" : "visible";
           el.style.transform = transform;
           el.style.filter = filter;
+          // pontos interativos só aparecem quando a foto está parada e nítida
+          if (!suffix) el.dataset.solid = o > 0.85 && blur < 0.3 ? "1" : "0";
         }
       }
 
       const arrive = s.arrive;
       if (carRef.current) {
-        carRef.current.style.transform = `translate3d(0, ${(-(1 - arrive) * 16).toFixed(2)}%, 0) scale(${((0.14 + 0.86 * arrive) * s.zoom).toFixed(4)})`;
+        carRef.current.style.transform = `translate3d(${s.panX.toFixed(1)}px, calc(${(-(1 - arrive) * 16).toFixed(2)}% + ${s.panY.toFixed(1)}px), 0) scale(${((0.14 + 0.86 * arrive) * s.zoom).toFixed(4)})`;
         carRef.current.style.filter = arrive < 1 ? `blur(${((1 - arrive) * 7).toFixed(2)}px) brightness(${(0.35 + 0.65 * arrive).toFixed(3)})` : "";
       }
+      if (stageRef.current) stageRef.current.style.touchAction = s.zoomTarget > 1.02 ? "none" : "pan-y";
       if (roadRef.current) roadRef.current.style.backgroundPosition = `50% ${s.roadY.toFixed(1)}px, 0 0, 0 0`;
       root.style.setProperty("--hl", s.hl.toFixed(3));
       root.style.setProperty("--turn", s.turn.toFixed(3));
       root.style.setProperty("--road", (1 - s.turn).toFixed(3));
+      root.dataset.zoomed = s.zoom > 1.05 ? "1" : "0";
       if (miniRef.current) miniRef.current.setAttribute("transform", `rotate(${(-th).toFixed(2)})`);
 
-      // vista atual (só re-renderiza o React quando muda)
+      // vista atual (destaca o botão direto no DOM)
       const current = topW > 0.5 ? "top" : botW > 0.5 ? "bottom" : (w < 0.5 ? ring[a] : ring[b]).key;
       if (current !== s.active) {
         s.active = current;
@@ -272,7 +309,7 @@ export function Showroom({
       const s = sim.current;
       const dt = Math.min(0.05, (now - prev) / 1000);
       prev = now;
-      if (!s.visible) return;
+      if (!s.visible || s.paused) return;
 
       if (!s.introDone && s.introStart !== null) {
         const t = now - s.introStart;
@@ -292,7 +329,7 @@ export function Showroom({
           }
         } else s.theta = 0;
       } else {
-        if (!s.dragging) {
+        if (s.mode === "none") {
           if (s.target !== null) {
             const diff = shortest(s.theta, s.target);
             s.theta += diff * Math.min(1, dt * 7);
@@ -303,14 +340,34 @@ export function Showroom({
           } else if (Math.abs(s.vel) > 0.5) {
             s.theta += s.vel * dt;
             s.vel *= Math.exp(-dt * 2.6);
-          } else if (s.playing && !reduced.current && now - s.lastInteract > 3500) {
+          } else if (s.playing && !reduced.current && s.zoomTarget <= 1.02 && now - s.lastInteract > 3500) {
             s.theta += 9 * dt;
+          } else if (n > 1) {
+            // em repouso, encaixa na foto mais próxima: imagem nítida e pontos interativos visíveis
+            let best = s.theta;
+            let bestDist = Infinity;
+            for (const l of ring) {
+              const diff = shortest(s.theta, l.angle!);
+              if (Math.abs(diff) < bestDist) {
+                bestDist = Math.abs(diff);
+                best = s.theta + diff;
+              }
+            }
+            if (bestDist > 0.3) s.target = best;
           }
           s.phi += (s.phiTarget - s.phi) * Math.min(1, dt * 6);
         }
         s.hl += (s.hlTarget - s.hl) * Math.min(1, dt * 3);
       }
       s.zoom += (s.zoomTarget - s.zoom) * Math.min(1, dt * 8);
+      // sem zoom, a imagem volta ao centro; com zoom, não deixa sair do quadro
+      const stage = stageRef.current;
+      if (stage) {
+        const maxX = ((s.zoom - 1) * stage.clientWidth) / 2;
+        const maxY = ((s.zoom - 1) * stage.clientHeight) / 2;
+        s.panX = clamp(s.panX, -maxX, maxX);
+        s.panY = clamp(s.panY, -maxY, maxY);
+      }
       render();
     };
     raf = requestAnimationFrame(frame);
@@ -326,48 +383,94 @@ export function Showroom({
     if (!interacted) setInteracted(true);
   };
 
+  const pinchInfo = () => {
+    const [p1, p2] = [...sim.current.pointers.values()];
+    return { dist: Math.hypot(p1.x - p2.x, p1.y - p2.y), mx: (p1.x + p2.x) / 2, my: (p1.y + p2.y) / 2 };
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     interact();
     const s = sim.current;
-    s.dragging = true;
+    s.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    stageRef.current?.setPointerCapture(e.pointerId);
+    if (s.pointers.size === 2) {
+      // dois dedos: pinça para zoom (e arrastar move a imagem)
+      const p = pinchInfo();
+      s.mode = "pinch";
+      s.pinch = { dist: p.dist, zoom: s.zoomTarget, mx: p.mx, my: p.my };
+      s.vel = 0;
+      return;
+    }
+    s.mode = s.zoomTarget > 1.02 ? "pan" : "rotate";
     s.vel = 0;
     s.lastX = e.clientX;
     s.lastY = e.clientY;
     s.lastT = performance.now();
-    stageRef.current?.setPointerCapture(e.pointerId);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     const s = sim.current;
-    if (!s.dragging) return;
+    if (!s.pointers.has(e.pointerId)) return;
+    s.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const el = stageRef.current!;
-    const now = performance.now();
-    const dt = Math.max(1, now - s.lastT) / 1000;
-    const dTheta = ((e.clientX - s.lastX) / el.clientWidth) * 320;
-    s.theta += dTheta;
-    s.vel = 0.75 * s.vel + 0.25 * (dTheta / dt);
-    if (e.pointerType !== "touch") {
-      s.phi = clamp(s.phi - ((e.clientY - s.lastY) / el.clientHeight) * 190, hasBottom ? -90 : -18, hasTop ? 90 : 18);
+
+    if (s.mode === "pinch" && s.pointers.size >= 2) {
+      const p = pinchInfo();
+      s.zoomTarget = clamp((s.pinch.zoom * p.dist) / Math.max(1, s.pinch.dist), 1, MAX_ZOOM);
+      s.zoom = s.zoomTarget;
+      s.panX += p.mx - s.pinch.mx;
+      s.panY += p.my - s.pinch.my;
+      s.pinch.mx = p.mx;
+      s.pinch.my = p.my;
+      return;
+    }
+    if (s.mode === "pan") {
+      s.panX += e.clientX - s.lastX;
+      s.panY += e.clientY - s.lastY;
+    } else if (s.mode === "rotate") {
+      const now = performance.now();
+      const dt = Math.max(1, now - s.lastT) / 1000;
+      const dTheta = ((e.clientX - s.lastX) / el.clientWidth) * 320;
+      s.theta += dTheta;
+      s.vel = 0.75 * s.vel + 0.25 * (dTheta / dt);
+      if (e.pointerType !== "touch") {
+        s.phi = clamp(s.phi - ((e.clientY - s.lastY) / el.clientHeight) * 190, hasBottom ? -90 : -18, hasTop ? 90 : 18);
+      }
+      s.lastT = now;
     }
     s.lastX = e.clientX;
     s.lastY = e.clientY;
-    s.lastT = now;
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
     const s = sim.current;
-    if (!s.dragging) return;
-    s.dragging = false;
+    if (!s.pointers.delete(e.pointerId)) return;
     s.lastInteract = performance.now();
-    const next = s.phi > 45 && hasTop ? 90 : s.phi < -45 && hasBottom ? -90 : 0;
-    s.phiTarget = next;
-    setElevation(next as 0 | 90 | -90);
+    if (s.mode === "pinch") {
+      // continua movendo a imagem com o dedo que sobrou
+      const rest = [...s.pointers.values()][0];
+      s.mode = rest ? "pan" : "none";
+      if (rest) {
+        s.lastX = rest.x;
+        s.lastY = rest.y;
+      }
+      if (s.zoomTarget < 1.08) s.zoomTarget = 1;
+      return;
+    }
+    if (s.pointers.size) return;
+    if (s.mode === "rotate") {
+      const next = s.phi > 45 && hasTop ? 90 : s.phi < -45 && hasBottom ? -90 : 0;
+      s.phiTarget = next;
+      setElevation(next as 0 | 90 | -90);
+    }
+    s.mode = "none";
   };
 
   const goTo = (view: ShowcaseView) => {
     interact();
     const s = sim.current;
+    s.zoomTarget = 1;
     if (view === "top" || view === "bottom") {
       const next = view === "top" ? 90 : -90;
       s.phiTarget = next;
@@ -383,10 +486,27 @@ export function Showroom({
   const zoom = (dir: 1 | -1) => {
     interact();
     const s = sim.current;
-    s.zoomTarget = clamp(s.zoomTarget + dir * 0.35, 1, 2.4);
+    s.zoomTarget = clamp(s.zoomTarget + dir * 0.4, 1, MAX_ZOOM);
   };
 
+  const openDetail = (h: Hotspot) => {
+    interact();
+    sim.current.target = sim.current.theta + shortest(sim.current.theta, VIEW_ANGLE[h.view]);
+    setDetail({ hotspot: h, photo: 0 });
+  };
+
+  const stepPhoto = (dir: 1 | -1) =>
+    setDetail((d) => (d && d.hotspot.photos.length ? { ...d, photo: (d.photo + dir + d.hotspot.photos.length) % d.hotspot.photos.length } : d));
+
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (detail) {
+      const keys: Record<string, () => void> = { Escape: () => setDetail(null), ArrowLeft: () => stepPhoto(-1), ArrowRight: () => stepPhoto(1) };
+      if (keys[e.key]) {
+        e.preventDefault();
+        keys[e.key]();
+      }
+      return;
+    }
     const s = sim.current;
     const step: Record<string, () => void> = {
       ArrowLeft: () => (s.target = (s.target ?? s.theta) - 45),
@@ -419,20 +539,49 @@ export function Showroom({
       <div
         key={l.key + (refl ? ":refl" : "")}
         ref={register(l.key + (refl ? ":refl" : ""))}
-        className="absolute inset-0 grid will-change-transform [container-type:size]"
+        className="showroom-layer absolute inset-0 grid will-change-transform [container-type:size]"
         style={{ placeItems: l.angle === null ? "center" : "end center", opacity: first && !refl ? 1 : 0, visibility: first ? "visible" : "hidden" }}
       >
         <div className="relative" style={{ width: `min(100cqw, calc(100cqh * ${r}))`, aspectRatio: String(r) }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={l.url} alt={refl ? "" : `${name} — ${VIEW_LABEL[l.key]}`} draggable={false} className="absolute inset-0 size-full object-contain" />
           {l.key === "front" && !refl && showcase.headlights.map((h, i) => <span key={i} className="showroom-hl" style={{ left: `${h.x}%`, top: `${h.y}%` }} />)}
+          {!refl &&
+            hotspots
+              .filter((h) => h.view === l.key)
+              .map((h) => {
+                const Icon = HOTSPOT_META[h.kind].icon;
+                return (
+                  <button
+                    key={h.id}
+                    type="button"
+                    className="showroom-pin"
+                    style={{ left: `${h.x}%`, top: `${h.y}%` }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => openDetail(h)}
+                    aria-label={`Ver detalhes: ${h.label}`}
+                  >
+                    <span className="showroom-pin-dot">
+                      <Icon className="size-3.5" />
+                    </span>
+                    <span className="showroom-pin-label">{h.label}</span>
+                  </button>
+                );
+              })}
         </div>
       </div>
     );
   };
 
   const viewButtons: ShowcaseView[] = [...ring.map((l) => l.key), ...(hasTop ? ["top" as const] : []), ...(hasBottom ? ["bottom" as const] : [])];
-  const glassBtn = "grid size-10 place-items-center rounded-full border border-white/15 bg-white/[0.07] text-white/85 backdrop-blur-md transition hover:bg-white/15 hover:text-white";
+  const fg = light ? "text-zinc-900" : "text-white";
+  const glassBtn = cn(
+    "grid size-10 place-items-center rounded-full border backdrop-blur-md transition",
+    light ? "border-zinc-900/10 bg-white/60 text-zinc-700 hover:bg-white hover:text-zinc-950" : "border-white/15 bg-white/[0.07] text-white/85 hover:bg-white/15 hover:text-white",
+  );
+  const glassPanel = light ? "border-zinc-900/10 bg-white/55" : "border-white/10 bg-white/[0.05]";
+  const muted = light ? "text-zinc-500" : "text-white/50";
+  const openPhoto = detail?.hotspot.photos[detail.photo];
 
   return (
     <section
@@ -440,8 +589,11 @@ export function Showroom({
       tabIndex={0}
       onKeyDown={onKeyDown}
       aria-label={`Showroom 360° — ${name}. Arraste para girar.`}
+      data-theme={light ? "light" : "dark"}
       className={cn(
-        "showroom relative isolate overflow-hidden bg-[#06070a] text-white outline-none select-none",
+        "showroom relative isolate overflow-hidden outline-none select-none",
+        light ? "bg-[#ecebe7]" : "bg-[#06070a]",
+        fg,
         fullscreen ? "h-screen" : "h-[76vh] min-h-[540px] max-h-[880px] rounded-[36px] shadow-[0_40px_90px_-40px_rgb(0_0_0/0.8)]",
         className,
       )}
@@ -450,6 +602,10 @@ export function Showroom({
       {/* ambiente */}
       <div className="showroom-ambient" />
       <div className="showroom-spot" />
+      {showcase.studio === "logo" && logoUrl && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={logoUrl} alt="" className="pointer-events-none absolute left-1/2 top-[7%] h-[13%] -translate-x-1/2 object-contain opacity-80" />
+      )}
       <div ref={roadRef} className="showroom-road" />
       <div className="showroom-floor" />
       <div className="showroom-dust" />
@@ -463,7 +619,7 @@ export function Showroom({
         onPointerCancel={onPointerUp}
         onDoubleClick={() => {
           interact();
-          sim.current.zoomTarget = sim.current.zoomTarget > 1.2 ? 1 : 1.8;
+          sim.current.zoomTarget = sim.current.zoomTarget > 1.2 ? 1 : 2;
         }}
         className="absolute inset-x-[4%] bottom-[24%] top-[17%] cursor-grab touch-pan-y active:cursor-grabbing sm:inset-x-[10%]"
       >
@@ -483,15 +639,15 @@ export function Showroom({
       <div ref={hudRef} className="pointer-events-none absolute inset-0 transition-opacity duration-1000" style={{ opacity: 0 }}>
         <div className="flex items-start justify-between gap-4 p-5 sm:p-8">
           <div className="max-w-xl">
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/80 backdrop-blur-md">
+            <span className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] backdrop-blur-md", glassPanel, light ? "text-zinc-700" : "text-white/80")}>
               <span className="size-1.5 animate-pulse rounded-full bg-[var(--brand)] shadow-[0_0_10px_var(--brand)]" /> Showroom 360°
             </span>
-            {eyebrow && <p className="mt-4 text-xs font-medium uppercase tracking-[0.2em] text-white/50">{eyebrow}</p>}
-            <h2 className="mt-1 text-3xl font-semibold tracking-[-0.03em] sm:text-5xl">{name}</h2>
-            {price && <p className="mt-2 text-lg font-medium text-white/80 tabular-nums sm:text-xl">{price}</p>}
+            {eyebrow && <p className={cn("mt-4 text-xs font-medium uppercase tracking-[0.2em]", muted)}>{eyebrow}</p>}
+            <h2 className="mt-1 text-2xl font-semibold tracking-[-0.03em] sm:text-5xl">{name}</h2>
+            {price && <p className={cn("mt-2 text-lg font-medium tabular-nums sm:text-xl", light ? "text-zinc-700" : "text-white/80")}>{price}</p>}
           </div>
-          <div className="pointer-events-auto flex gap-2">
-            <button type="button" onClick={startIntro} className={glassBtn} title="Ver a chegada de novo" aria-label="Ver a chegada de novo">
+          <div className="pointer-events-auto flex shrink-0 gap-2">
+            <button type="button" onClick={startIntro} className={cn(glassBtn, "max-sm:hidden")} title="Ver a chegada de novo" aria-label="Ver a chegada de novo">
               <Sparkles className="size-4" />
             </button>
             <button type="button" onClick={() => setPlaying((p) => !p)} className={glassBtn} title={playing ? "Pausar giro automático" : "Girar sozinho"} aria-label={playing ? "Pausar giro automático" : "Girar sozinho"}>
@@ -505,37 +661,38 @@ export function Showroom({
 
         {/* ficha técnica */}
         {specs.length > 0 && (
-          <dl className="absolute bottom-6 right-6 hidden w-[300px] grid-cols-2 gap-x-5 gap-y-3 rounded-3xl border border-white/10 bg-white/[0.04] p-5 backdrop-blur-md xl:grid">
+          <dl className={cn("absolute bottom-6 right-6 hidden w-[300px] grid-cols-2 gap-x-5 gap-y-3 rounded-3xl border p-5 backdrop-blur-md xl:grid", glassPanel)}>
             {specs.slice(0, 6).map((s) => (
               <div key={s.label}>
-                <dt className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/45">{s.label}</dt>
-                <dd className="text-sm font-medium text-white/90">{s.value}</dd>
+                <dt className={cn("text-[10px] font-semibold uppercase tracking-[0.2em]", light ? "text-zinc-500" : "text-white/45")}>{s.label}</dt>
+                <dd className={cn("text-sm font-medium", light ? "text-zinc-900" : "text-white/90")}>{s.value}</dd>
               </div>
             ))}
           </dl>
         )}
 
-        {/* bússola + vistas */}
-        <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-3 p-4 sm:p-6">
+        {/* bússola, vistas e detalhes */}
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-2.5 p-3 sm:gap-3 sm:p-6">
           {!interacted && (
-            <p className="flex items-center gap-2 rounded-full bg-black/30 px-4 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
+            <p className={cn("flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-medium backdrop-blur-md", light ? "bg-white/60 text-zinc-700" : "bg-black/30 text-white/80")}>
               <Hand className="showroom-hand size-4" /> Arraste para girar 360°
+              <span className="max-sm:hidden">· pinça ou Ctrl + roda para zoom</span>
             </p>
           )}
           <div className="pointer-events-auto flex items-center gap-3">
             <button type="button" onClick={() => zoom(-1)} className={glassBtn} aria-label="Afastar">
               <Minus className="size-4" />
             </button>
-            <div className="relative grid size-[74px] place-items-center rounded-full border border-white/15 bg-white/[0.05] backdrop-blur-md">
+            <div className={cn("relative grid size-[66px] place-items-center rounded-full border backdrop-blur-md sm:size-[74px]", glassPanel)}>
               <svg viewBox="-50 -50 100 100" className="size-full">
                 {Array.from({ length: 24 }, (_, i) => (
-                  <line key={i} x1="0" y1="-44" x2="0" y2={i % 6 === 0 ? -37 : -40} stroke="white" strokeOpacity={i % 6 === 0 ? 0.5 : 0.2} strokeWidth="1.5" transform={`rotate(${i * 15})`} />
+                  <line key={i} x1="0" y1="-44" x2="0" y2={i % 6 === 0 ? -37 : -40} stroke="currentColor" strokeOpacity={i % 6 === 0 ? 0.5 : 0.2} strokeWidth="1.5" transform={`rotate(${i * 15})`} />
                 ))}
                 <circle cx="0" cy="44" r="3.5" fill="var(--brand)" />
                 <g ref={miniRef}>
-                  <rect x="-9" y="-20" width="18" height="40" rx="7" fill="white" fillOpacity="0.9" />
-                  <rect x="-7" y="-6" width="14" height="12" rx="3" fill="#06070a" fillOpacity="0.75" />
-                  <rect x="-6" y="11" width="12" height="5" rx="2" fill="#06070a" fillOpacity="0.55" />
+                  <rect x="-9" y="-20" width="18" height="40" rx="7" fill="currentColor" fillOpacity="0.9" />
+                  <rect x="-7" y="-6" width="14" height="12" rx="3" fill={light ? "#ecebe7" : "#06070a"} fillOpacity="0.75" />
+                  <rect x="-6" y="11" width="12" height="5" rx="2" fill={light ? "#ecebe7" : "#06070a"} fillOpacity="0.55" />
                 </g>
               </svg>
             </div>
@@ -543,7 +700,24 @@ export function Showroom({
               <Plus className="size-4" />
             </button>
           </div>
-          <div className="pointer-events-auto flex max-w-full gap-1 overflow-x-auto rounded-full border border-white/10 bg-white/[0.05] p-1 backdrop-blur-md [scrollbar-width:none]">
+          {hotspots.length > 0 && (
+            <div className={cn("pointer-events-auto flex max-w-full gap-1 overflow-x-auto rounded-full border p-1 backdrop-blur-md [scrollbar-width:none]", glassPanel)}>
+              {hotspots.map((h) => {
+                const Icon = HOTSPOT_META[h.kind].icon;
+                return (
+                  <button
+                    key={h.id}
+                    type="button"
+                    onClick={() => openDetail(h)}
+                    className={cn("inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition", light ? "text-zinc-700 hover:bg-white" : "text-white/80 hover:bg-white/10 hover:text-white")}
+                  >
+                    <Icon className="size-3.5 text-[var(--brand)]" /> {h.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className={cn("pointer-events-auto flex max-w-full gap-1 overflow-x-auto rounded-full border p-1 backdrop-blur-md [scrollbar-width:none]", glassPanel)}>
             {viewButtons.map((v) => (
               <button
                 key={v}
@@ -554,7 +728,10 @@ export function Showroom({
                 type="button"
                 onClick={() => goTo(v)}
                 data-active={v === ring[0]?.key ? "1" : "0"}
-                className="whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium text-white/70 transition hover:text-white data-[active=1]:bg-white data-[active=1]:text-zinc-950"
+                className={cn(
+                  "whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition",
+                  light ? "text-zinc-600 hover:text-zinc-950 data-[active=1]:bg-zinc-950 data-[active=1]:text-white" : "text-white/70 hover:text-white data-[active=1]:bg-white data-[active=1]:text-zinc-950",
+                )}
               >
                 {VIEW_SHORT[v]}
               </button>
@@ -563,11 +740,73 @@ export function Showroom({
         </div>
       </div>
 
+      {/* detalhe do ponto interativo: fotos reais enviadas pelo vendedor */}
+      {detail && (
+        <div className={cn("absolute inset-0 z-20 flex flex-col backdrop-blur-xl animate-fade-up", light ? "bg-[#ecebe7]/90" : "bg-[#06070a]/88")} role="dialog" aria-label={detail.hotspot.label}>
+          <div className="flex items-center gap-3 p-4 sm:p-6">
+            {(() => {
+              const Icon = HOTSPOT_META[detail.hotspot.kind].icon;
+              return (
+                <span className="grid size-10 place-items-center rounded-full bg-[var(--brand)] text-white shadow-[0_0_24px_-4px_var(--brand)]">
+                  <Icon className="size-5" />
+                </span>
+              );
+            })()}
+            <div className="min-w-0 flex-1">
+              <p className={cn("text-[11px] font-semibold uppercase tracking-[0.2em]", muted)}>{name}</p>
+              <h3 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">{detail.hotspot.label}</h3>
+            </div>
+            <button type="button" onClick={() => setDetail(null)} className={glassBtn} aria-label="Fechar detalhes">
+              <X className="size-4" />
+            </button>
+          </div>
+          <div className="relative min-h-0 flex-1 px-4 sm:px-16">
+            {openPhoto ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img key={openPhoto} src={openPhoto} alt={`${detail.hotspot.label} — foto ${detail.photo + 1}`} className="animate-fade-up size-full rounded-2xl object-contain" />
+                {detail.hotspot.photos.length > 1 && (
+                  <>
+                    <button type="button" onClick={() => stepPhoto(-1)} className={cn(glassBtn, "absolute left-2 top-1/2 -translate-y-1/2 sm:left-4")} aria-label="Foto anterior">
+                      <ChevronLeft className="size-5" />
+                    </button>
+                    <button type="button" onClick={() => stepPhoto(1)} className={cn(glassBtn, "absolute right-2 top-1/2 -translate-y-1/2 sm:right-4")} aria-label="Próxima foto">
+                      <ChevronRight className="size-5" />
+                    </button>
+                  </>
+                )}
+              </>
+            ) : (
+              <div className={cn("grid size-full place-items-center text-sm", muted)}>Sem fotos deste detalhe.</div>
+            )}
+          </div>
+          <div className="space-y-3 p-4 sm:p-6">
+            {detail.hotspot.note && <p className={cn("mx-auto max-w-2xl text-center text-sm leading-relaxed", light ? "text-zinc-700" : "text-white/80")}>{detail.hotspot.note}</p>}
+            {detail.hotspot.photos.length > 1 && (
+              <div className="flex justify-center gap-2 overflow-x-auto [scrollbar-width:none]">
+                {detail.hotspot.photos.map((p, i) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setDetail((d) => d && { ...d, photo: i })}
+                    className={cn("size-14 shrink-0 overflow-hidden rounded-xl ring-2 transition sm:size-16", i === detail.photo ? "ring-[var(--brand)]" : "opacity-60 ring-transparent hover:opacity-100")}
+                    aria-label={`Foto ${i + 1}`}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={p} alt="" className="size-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* carregando */}
-      <div className={cn("absolute inset-0 grid place-items-center bg-[#06070a] transition-opacity duration-700", ready ? "pointer-events-none opacity-0" : "opacity-100")}>
+      <div className={cn("absolute inset-0 grid place-items-center transition-opacity duration-700", light ? "bg-[#ecebe7]" : "bg-[#06070a]", ready ? "pointer-events-none opacity-0" : "opacity-100")}>
         <div className="w-56 text-center">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/60">Preparando o showroom</p>
-          <div className="mt-4 h-0.5 overflow-hidden rounded-full bg-white/10">
+          <p className={cn("text-[11px] font-semibold uppercase tracking-[0.25em]", light ? "text-zinc-500" : "text-white/60")}>Preparando o showroom</p>
+          <div className={cn("mt-4 h-0.5 overflow-hidden rounded-full", light ? "bg-zinc-900/10" : "bg-white/10")}>
             <div className="h-full bg-[var(--brand)] shadow-[0_0_12px_var(--brand)] transition-[width] duration-300" style={{ width: `${(loaded / Math.max(1, layers.length)) * 100}%` }} />
           </div>
         </div>

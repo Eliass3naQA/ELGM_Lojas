@@ -1,4 +1,15 @@
-import { SHOWCASE_RING, type Product, type Showcase, type ShowcaseRingView, type ShowcaseView } from "./types";
+import { SHOWCASE_RING, type Product, type Showcase, type ShowcaseRingView, type ShowcaseView, type StudioScene } from "./types";
+
+export const SCENE_LABEL: Record<StudioScene, string> = {
+  dark: "Preto premium",
+  beige: "Bege neutro",
+  white: "Branco infinito",
+  brand: "Cor da loja",
+  logo: "Logo da loja",
+};
+
+/** Cenários claros pedem showroom claro. */
+export const isLightScene = (s: StudioScene | null | undefined) => s === "beige" || s === "white" || s === "logo";
 
 // Ângulo de cada foto ao redor do produto (0° = frente voltada para quem olha).
 // Girando para a direita, a frente vai para a direita da tela e aparece a lateral direita do produto.

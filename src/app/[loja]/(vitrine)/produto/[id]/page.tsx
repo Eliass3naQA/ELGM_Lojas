@@ -30,6 +30,7 @@ export default async function ProductPage({ params }: { params: Promise<{ loja: 
           eyebrow={product.category}
           price={`${product.variants.some((v) => v.price !== null) ? "a partir de " : ""}${money(price.price)}`}
           showcase={product.showcase}
+          logoUrl={store.logoUrl}
           specs={product.specs}
           brand={store.brandColor}
           className="mb-4 sm:mb-6"

@@ -73,6 +73,13 @@ GET               /api/plans
 - **Promoções**: preço promocional com início/fim opcionais (variações com preço próprio recebem o mesmo % de desconto). Cupons de %, valor fixo ou frete grátis, com pedido mínimo, validade e limite de usos — sempre recalculados no servidor.
 - **Fotos**: até 10 por produto (a 1ª é a principal; a 2ª aparece ao passar o mouse na vitrine), logo e capa da loja. Só JPG/PNG/WEBP, conferidos pelo conteúdo do arquivo.
 
+## Showroom digital (veículos)
+
+- **Showroom 360°** (`components/store/showroom.tsx`): a partir das fotos de cada ângulo (frente, traseira, laterais, diagonais opcionais, cima e baixo) o sistema monta um giro contínuo. Mouse ou toque para girar, pinça / Ctrl + roda / duplo clique para zoom, arrastar com zoom para explorar detalhes, tela cheia. Chegada animada com os faróis piscando (o vendedor marca os faróis na foto da frente).
+- **Pontos interativos**: o vendedor clica sobre o veículo (capô, roda, vidro, porta-malas…) e anexa fotos reais do detalhe; o comprador clica no ponto e abre a galeria daquele detalhe.
+- **Estúdio fotográfico** (`lib/studio/`): a IA de recorte roda **no navegador do vendedor** (BiRefNet lite, licença MIT, via transformers.js — WebGPU quando a placa suporta, senão WASM). O modelo (~115–224 MB) é baixado na primeira vez e fica guardado no navegador. Cada foto gera: original, recorte, imagem do showroom (fundo transparente, enquadramento padronizado) e foto de catálogo 1:1 no cenário escolhido (preto, bege, branco, cor da loja, logo). Trocar o cenário reaproveita os recortes.
+- **Cadastro inteligente** (`lib/ai/vehicle-specs.ts`): em lojas de veículos, o vendedor informa modelo + ano e o Claude sugere nome, categoria, ficha técnica e descrição para revisão. Requer `ANTHROPIC_API_KEY` no servidor; limite de 40 consultas/hora por loja.
+
 ## Login e pagamento (simulados)
 
 **Login** — `/{loja}/entrar` simula o OAuth: aceita só e-mails do provedor escolhido (Google: gmail · Microsoft: hotmail/outlook/live · Apple: icloud/me/mac). A sessão é um cookie httpOnly assinado (HMAC). Defina `SESSION_SECRET` em produção.

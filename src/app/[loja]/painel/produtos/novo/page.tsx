@@ -1,7 +1,7 @@
 import { ProductForm } from "@/components/painel/product-form";
 import { loadStore } from "@/lib/data/load-store";
 import { PageHeader } from "@/components/ui";
-import { optionTemplatesFor } from "@/lib/catalog-templates";
+import { isVehicleStore, optionTemplatesFor } from "@/lib/catalog-templates";
 import { listProducts } from "@/lib/data/repository";
 
 export const metadata = { title: "Novo produto" };
@@ -12,7 +12,7 @@ export default async function NewProductPage({ params }: { params: Promise<{ loj
   return (
     <>
       <PageHeader title="Novo produto" />
-      <ProductForm slug={store.slug} brand={store.brandColor} categories={categories} templates={optionTemplatesFor(store.category)} />
+      <ProductForm slug={store.slug} brand={store.brandColor} logoUrl={store.logoUrl} vehicles={isVehicleStore(store.category)} categories={categories} templates={optionTemplatesFor(store.category)} />
     </>
   );
 }

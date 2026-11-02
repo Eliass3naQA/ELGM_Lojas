@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { loadStore } from "@/lib/data/load-store";
 import { ProductForm } from "@/components/painel/product-form";
 import { PageHeader } from "@/components/ui";
-import { optionTemplatesFor } from "@/lib/catalog-templates";
+import { isVehicleStore, optionTemplatesFor } from "@/lib/catalog-templates";
 import { getProduct, listProducts } from "@/lib/data/repository";
 
 export default async function EditProductPage({ params }: { params: Promise<{ loja: string; id: string }> }) {
@@ -14,7 +14,7 @@ export default async function EditProductPage({ params }: { params: Promise<{ lo
   return (
     <>
       <PageHeader title="Editar produto" description={product.name} />
-      <ProductForm slug={store.slug} brand={store.brandColor} product={product} categories={categories} templates={optionTemplatesFor(store.category)} />
+      <ProductForm slug={store.slug} brand={store.brandColor} logoUrl={store.logoUrl} vehicles={isVehicleStore(store.category)} product={product} categories={categories} templates={optionTemplatesFor(store.category)} />
     </>
   );
 }

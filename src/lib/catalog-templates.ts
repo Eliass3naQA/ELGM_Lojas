@@ -27,6 +27,9 @@ const bySegment: Record<string, OptionTemplate[]> = {
   beleza: [T.volume, T.cor],
 };
 
+/** Lojas de veículos ganham o cadastro inteligente (ficha técnica por IA). */
+export const isVehicleStore = (category: string) => /ve[íi]cul|carro|autom[óo]v|moto|seminovo|concession/i.test(category);
+
 export function optionTemplatesFor(category: string): OptionTemplate[] {
   const key = category.trim().toLowerCase();
   return bySegment[key] ?? [T.tamanhoGenerico, T.cor];
