@@ -142,7 +142,7 @@ export function PaymentPanel({ slug, orderId, payment, instructions }: { slug: s
         {instructions?.pix && (
           <>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={instructions.pix.qrDataUrl} alt="QR Code Pix" className="mx-auto size-48 rounded-xl border border-zinc-100 p-2" />
+            <img src={instructions.pix.qrDataUrl} alt="QR Code Pix" className="mx-auto size-48 rounded-xl bg-[#fff] p-2" />
             <div className="min-w-0 space-y-4">
               <div>
                 <p className="font-semibold">Pague {money(payment.amount)} com Pix</p>

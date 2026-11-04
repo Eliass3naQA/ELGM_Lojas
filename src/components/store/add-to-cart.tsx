@@ -22,7 +22,7 @@ export function AddToCartButton({ item, compact, withQty, disabled, className }:
   return (
     <div className={cn("flex gap-2", className)}>
       {withQty && !blocked && (
-        <div className="flex items-center rounded-full bg-white/75 shadow-sm ring-1 ring-white">
+        <div className="flex items-center rounded-full bg-white/75 text-zinc-900 shadow-sm ring-1 ring-white">
           <button className="p-2.5 text-zinc-500 hover:text-zinc-900" onClick={() => setQty((q) => Math.max(1, q - 1))} aria-label="Diminuir">
             <Minus className="size-4" />
           </button>

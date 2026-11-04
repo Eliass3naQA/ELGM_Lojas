@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { Rotate3d } from "lucide-react";
-import { money } from "@/lib/format";
-import { hasShowroom } from "@/lib/showcase";
-import { availableStock, fromPrice, type PriceInfo } from "@/lib/pricing";
+import { moneyShort } from "@/lib/format";
+import { displayViews, hasCutouts, hasShowroom } from "@/lib/showcase";
+import { availableStock, fromPrice } from "@/lib/pricing";
 import type { Product } from "@/lib/types";
 import { Img } from "../media";
+import { cn } from "../ui";
 import { AddToCartButton } from "./add-to-cart";
+import { FavoriteButton } from "./favorites";
 
 /** Estoque total vendável (Infinity se não controla). */
 export function totalAvailable(product: Product) {
@@ -13,76 +14,73 @@ export function totalAvailable(product: Product) {
   return product.variants.length ? product.variants.reduce((s, v) => s + v.stock, 0) : product.stock;
 }
 
-export function ProductImage({ product, price, soldOut }: { product: Product; price: PriceInfo; soldOut: boolean }) {
+/** Carros com recorte pousam sobre o cenário e giram ao passar o mouse; os demais usam a foto. */
+function CardMedia({ product, wide }: { product: Product; wide: boolean }) {
+  if (hasCutouts(product) && product.showcase) {
+    const views = displayViews(product.showcase).map((v) => product.showcase!.views[v]!);
+    // sozinho na coleção, o card vem logo abaixo da abertura: mostra outro ângulo para não repetir a mesma foto
+    const [main, alt] = wide && views.length > 1 ? [views[1], views[0]] : views;
+    return (
+      <>
+        <Img src={main} alt={product.name} className="shop-cutout p-[5%]" />
+        {alt && <Img src={alt} alt="" className="shop-cutout shop-cutout-alt p-[5%]" />}
+      </>
+    );
+  }
   const [first, second] = product.images;
+  if (!first) return <span className="absolute inset-0 grid place-items-center text-7xl transition duration-500 group-hover:scale-105">{product.image}</span>;
   return (
-    <div className="relative grid aspect-square place-items-center overflow-hidden rounded-[20px] bg-white/70 ring-1 ring-white">
-      {first ? (
-        <>
-          <Img src={first} alt={product.name} className="absolute inset-0 size-full object-cover transition duration-500 group-hover:scale-105" />
-          {/* segunda foto aparece ao passar o mouse */}
-          {second && <Img src={second} alt="" className="absolute inset-0 size-full object-cover opacity-0 transition duration-500 group-hover:opacity-100" />}
-        </>
-      ) : (
-        <span className="text-7xl transition duration-300 group-hover:scale-110">{product.image}</span>
-      )}
-      {hasShowroom(product) && (
-        <span className="absolute right-2.5 top-2.5 inline-flex items-center gap-1 rounded-full bg-zinc-950/80 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white shadow-lg backdrop-blur">
-          <Rotate3d className="size-3.5" /> 360°
-        </span>
-      )}
-      {price.onSale && <span className="absolute left-2.5 top-2.5 rounded-full bg-[var(--brand)] px-2.5 py-1 text-xs font-semibold text-white shadow-[0_6px_14px_-6px_var(--brand)]">-{price.discountPct}%</span>}
-      {soldOut && (
-        <span className="absolute inset-0 grid place-items-center bg-white/45 backdrop-blur-sm">
-          <span className="rounded-full bg-white/90 px-3 py-1 text-sm font-semibold text-zinc-700 shadow-sm">Esgotado</span>
-        </span>
-      )}
-    </div>
+    <>
+      <Img src={first} alt={product.name} className="absolute inset-0 size-full object-cover transition duration-1000 group-hover:scale-[1.03]" />
+      {second && <Img src={second} alt="" className="absolute inset-0 size-full object-cover opacity-0 transition duration-700 group-hover:opacity-100" />}
+    </>
   );
 }
 
-export function Price({ price, large, from }: { price: PriceInfo; large?: boolean; from?: boolean }) {
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2">
-      {from && <span className="text-xs text-zinc-500">a partir de</span>}
-      <span className={large ? "text-3xl font-semibold tracking-[-0.02em] tabular-nums" : "font-semibold tabular-nums text-zinc-950"}>{money(price.price)}</span>
-      {price.onSale && <span className="text-sm text-zinc-400 line-through">{money(price.regular)}</span>}
-    </div>
-  );
-}
-
-export function ProductCard({ product, slug, now }: { product: Product; slug: string; now: number }) {
+export function ProductCard({ product, slug, now, vehicle = false, wide = false }: { product: Product; slug: string; now: number; vehicle?: boolean; wide?: boolean }) {
   const price = fromPrice(product, now);
   const available = totalAvailable(product);
   const href = `/${slug}/produto/${product.id}`;
   const varies = product.variants.some((v) => v.price !== null);
+  const soldOut = available === 0;
   return (
-    <div className="glass group animate-fade-up flex flex-col rounded-[26px] p-2 transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_30px_50px_-28px_rgb(0_0_0/0.35)]">
-      <Link href={href}>
-        <ProductImage product={product} price={price} soldOut={available === 0} />
-      </Link>
-      <div className="flex flex-1 flex-col px-2 pb-1.5 pt-3">
-        <p className="text-xs text-zinc-500">{product.category}</p>
-        <Link href={href} className="mt-0.5 line-clamp-2 text-sm font-medium text-zinc-900 hover:underline">
-          {product.name}
+    <article className="group reveal relative flex flex-col">
+      <div className="relative">
+        <Link href={href} tabIndex={-1} aria-hidden className={cn("shop-media", wide ? "aspect-[4/3] md:aspect-[21/9]" : "aspect-[4/3]")}>
+          <CardMedia product={product} wide={wide} />
+          {soldOut && <span className="absolute inset-0 grid place-items-center bg-black/55 text-sm font-medium tracking-wide text-white backdrop-blur-[2px]">{vehicle ? "Vendido" : "Esgotado"}</span>}
         </Link>
-        <div className="mt-1.5">
-          <Price price={price} from={varies} />
+        <div className="pointer-events-none absolute left-3.5 top-3.5 flex gap-1.5">
+          {price.onSale && <span className="rounded-full bg-[var(--brand)] px-2.5 py-1 text-[11px] font-semibold text-white">-{price.discountPct}%</span>}
+          {hasShowroom(product) && <span className="rounded-full border border-white/20 px-2.5 py-1 text-[11px] font-medium tracking-wide text-white/85 backdrop-blur">360°</span>}
         </div>
-        {available > 0 && available <= product.lowStockThreshold && <p className="mt-1 text-xs font-medium text-amber-600">Últimas {available} unidades</p>}
-        {/* empurra o botão para a base, alinhando cards de alturas diferentes */}
-        <div className="min-h-3 flex-1" />
-        {product.variants.length ? (
-          <Link href={href} className="rounded-full bg-white/75 py-2 text-center text-xs font-medium text-zinc-800 shadow-sm transition hover:bg-white">
-            {available === 0 ? "Esgotado" : `Ver ${product.options.map((o) => o.name.toLowerCase()).join(" e ")}`}
-          </Link>
-        ) : (
-          <AddToCartButton
-            item={{ productId: product.id, variantId: null, variantLabel: null, name: product.name, image: product.image, imageUrl: product.images[0] ?? null, price: price.price, stock: availableStock(product) }}
-            compact
-          />
+        <FavoriteButton slug={slug} productId={product.id} name={product.name} className="pdp-icon-btn shop-fav absolute right-3 top-3 size-10" iconClassName="size-4" />
+      </div>
+
+      <div className="flex flex-1 flex-col px-1 pt-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <Link href={href} className="line-clamp-2 text-[15px] font-medium leading-snug tracking-[-0.01em] text-white after:absolute after:inset-x-0 after:top-0 after:bottom-[-4px] group-hover:text-[var(--amber)]">
+              {product.name}
+            </Link>
+            <p className="pdp-muted mt-1 text-[13px]">{product.category}</p>
+          </div>
+          <div className="shrink-0 text-right tabular-nums">
+            {varies && <p className="pdp-muted text-[11px]">a partir de</p>}
+            <p className="text-[15px] font-medium text-white">{moneyShort(price.price)}</p>
+            {price.onSale && <p className="pdp-muted text-xs line-through">{moneyShort(price.regular)}</p>}
+          </div>
+        </div>
+        {!vehicle && available > 0 && available <= product.lowStockThreshold && <p className="mt-1.5 text-xs text-[var(--amber)]">{available === 1 ? "Última unidade" : `Últimas ${available} unidades`}</p>}
+        {!vehicle && !product.variants.length && !soldOut && (
+          <div className="relative z-10 mt-3">
+            <AddToCartButton
+              item={{ productId: product.id, variantId: null, variantLabel: null, name: product.name, image: product.image, imageUrl: product.images[0] ?? null, price: price.price, stock: availableStock(product) }}
+              compact
+            />
+          </div>
         )}
       </div>
-    </div>
+    </article>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Hand, Maximize2, Minimize2, Minus, Pause, Play, Plus, Sparkles, X } from "lucide-react";
 import { isLightScene, ringViews, VIEW_ANGLE, VIEW_LABEL, VIEW_SHORT } from "@/lib/showcase";
 import type { Hotspot, Showcase, ShowcaseRingView, ShowcaseView, Spec } from "@/lib/types";
@@ -41,6 +41,12 @@ function headlightsAt(t: number) {
   return 0.95 - 0.75 * clamp((t - FLASH - 700) / 2600);
 }
 
+/** O que a galeria do produto comanda de fora: ir para um ângulo e ligar/desligar o giro automático. */
+export type ShowroomControls = {
+  goTo: (view: ShowcaseView) => void;
+  setAutoplay: (on: boolean) => void;
+};
+
 export function Showroom({
   name,
   eyebrow,
@@ -50,6 +56,14 @@ export function Showroom({
   brand,
   logoUrl = null,
   className,
+  embedded = false,
+  controls,
+  onViewChange,
+  onPlayingChange,
+  hero = false,
+  backdrop,
+  restView,
+  onReady,
 }: {
   name: string;
   eyebrow?: string;
@@ -59,6 +73,18 @@ export function Showroom({
   brand: string;
   logoUrl?: string | null;
   className?: string;
+  /** Dentro da galeria do produto: preenche o pai, sem título nem ficha, e fica parado até pedirem o giro. */
+  embedded?: boolean;
+  controls?: React.Ref<ShowroomControls>;
+  onViewChange?: (view: ShowcaseView) => void;
+  onPlayingChange?: (playing: boolean) => void;
+  /** Abertura da home: sempre escuro, sem nenhum controle; o carro é a peça central. */
+  hero?: boolean;
+  /** Fica atrás do carro e na frente da parede (o nome da loja, na abertura). */
+  backdrop?: React.ReactNode;
+  /** Ângulo em que o carro descansa depois da chegada. */
+  restView?: ShowcaseRingView;
+  onReady?: () => void;
 }) {
   const ring = useMemo<Layer[]>(() => ringViews(showcase).map((v) => ({ key: v, url: showcase.views[v]!, angle: VIEW_ANGLE[v] })), [showcase]);
   const layers = useMemo<Layer[]>(
@@ -71,8 +97,9 @@ export function Showroom({
   );
   const hasTop = !!showcase.views.top;
   const hasBottom = !!showcase.views.bottom;
-  const hotspots = useMemo(() => (showcase.hotspots ?? []).filter((h) => showcase.views[h.view]), [showcase]);
-  const light = isLightScene(showcase.studio);
+  const hotspots = useMemo(() => (hero ? [] : (showcase.hotspots ?? []).filter((h) => showcase.views[h.view])), [showcase, hero]);
+  const light = !hero && isLightScene(showcase.studio);
+  const restAngle = restView && showcase.views[restView] ? VIEW_ANGLE[restView] : null;
 
   const rootRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -87,7 +114,9 @@ export function Showroom({
   const [loaded, setLoaded] = useState(0);
   const ready = loaded >= layers.length;
   const [interacted, setInteracted] = useState(false);
-  const [playing, setPlaying] = useState(true);
+  const [playing, setPlaying] = useState(!embedded);
+  const onViewChangeRef = useRef(onViewChange);
+  onViewChangeRef.current = onViewChange;
   const [fullscreen, setFullscreen] = useState(false);
   const [elevation, setElevation] = useState<0 | 90 | -90>(0);
   const [detail, setDetail] = useState<{ hotspot: Hotspot; photo: number } | null>(null);
@@ -161,6 +190,7 @@ export function Showroom({
       s.arrive = 1;
       s.turn = 1;
       s.hl = s.hlTarget = 0;
+      s.theta = restAngle ?? s.theta;
       s.lastInteract = performance.now();
       showHud(true);
       return;
@@ -168,7 +198,7 @@ export function Showroom({
     Object.assign(s, { introStart: performance.now(), introDone: false, theta: 0, phi: 0, phiTarget: 0, vel: 0, target: null, zoomTarget: 1, panX: 0, panY: 0, arrive: 0, turn: 0 });
     showHud(false);
     setElevation(0);
-  }, [showcase.intro, showHud]);
+  }, [showcase.intro, showHud, restAngle]);
 
   /** Interrompe a chegada e deixa o produto no lugar, pronto para girar. */
   const skipIntro = useCallback(() => {
@@ -183,12 +213,16 @@ export function Showroom({
   }, [showHud]);
 
   useEffect(() => {
-    if (ready) startIntro();
+    if (!ready) return;
+    startIntro();
+    onReady?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onReady é só um aviso, não reinicia a chegada
   }, [ready, startIntro]);
 
   useEffect(() => {
     sim.current.playing = playing;
-  }, [playing]);
+    onPlayingChange?.(playing);
+  }, [playing, onPlayingChange]);
 
   useEffect(() => {
     sim.current.paused = !!detail;
@@ -230,6 +264,7 @@ export function Showroom({
     let raf = 0;
     let prev = performance.now();
     const n = ring.length;
+    const rest = hero ? 1.14 : embedded ? 1.25 : 1; // as fotos têm margem em volta do carro; no palco menor ele precisa ocupar mais
 
     const render = () => {
       const s = sim.current;
@@ -244,7 +279,9 @@ export function Showroom({
       const gap = n === 1 ? 360 : mod360(ring[b].angle! - ring[a].angle!) || 360;
       const d = mod360(th - ring[a].angle!);
       const t = clamp(d / gap);
-      const w = smooth(clamp((t - 0.12) / 0.76)); // segura um pouco em cada foto exata
+      // segura um pouco em cada foto exata; com fotos muito distantes entre si, a troca é mais curta para o carro não parecer um fantasma
+      const span = gap > 60 ? 0.3 : 0.76;
+      const w = smooth(clamp((t - (1 - span) / 2) / span));
       const topW = hasTop ? smooth(clamp((s.phi - 15) / 55)) : 0;
       const botW = hasBottom ? smooth(clamp((-s.phi - 15) / 55)) : 0;
       const ringVis = 1 - Math.max(topW, botW);
@@ -258,7 +295,8 @@ export function Showroom({
         if (l.angle !== null) {
           const i = ring.indexOf(l);
           const delta = i === a ? d : i === b ? d - gap : 0;
-          opacity = (i === a ? 1 - w : i === b ? w : 0) * ringVis;
+          // uma foto só some depois que a outra já cobriu: o carro nunca fica transparente no meio do giro
+          opacity = (i === a ? Math.min(1, 2 * (1 - w)) : i === b ? Math.min(1, 2 * w) : 0) * ringVis;
           if (n === 1) opacity = ringVis;
           const squeeze = 1 - 0.16 * Math.min(1, Math.abs(delta) / gap);
           transform = `translateX(${delta * 0.11}%) rotateX(${-tilt * 0.35}deg) rotateY(${delta * 0.42}deg) scaleX(${squeeze})`;
@@ -285,7 +323,7 @@ export function Showroom({
 
       const arrive = s.arrive;
       if (carRef.current) {
-        carRef.current.style.transform = `translate3d(${s.panX.toFixed(1)}px, calc(${(-(1 - arrive) * 16).toFixed(2)}% + ${s.panY.toFixed(1)}px), 0) scale(${((0.14 + 0.86 * arrive) * s.zoom).toFixed(4)})`;
+        carRef.current.style.transform = `translate3d(${s.panX.toFixed(1)}px, calc(${(-(1 - arrive) * 16).toFixed(2)}% + ${s.panY.toFixed(1)}px), 0) scale(${((0.14 + 0.86 * arrive) * s.zoom * rest).toFixed(4)})`;
         carRef.current.style.filter = arrive < 1 ? `blur(${((1 - arrive) * 7).toFixed(2)}px) brightness(${(0.35 + 0.65 * arrive).toFixed(3)})` : "";
       }
       if (stageRef.current) stageRef.current.style.touchAction = s.zoomTarget > 1.02 ? "none" : "pan-y";
@@ -301,6 +339,7 @@ export function Showroom({
       if (current !== s.active) {
         s.active = current;
         for (const [v, el] of pillEls.current) el.dataset.active = v === current ? "1" : "0";
+        onViewChangeRef.current?.(current);
       }
     };
 
@@ -319,20 +358,22 @@ export function Showroom({
         s.hl = headlightsAt(t);
         if (t > FLASH && !s.hudShown) showHud(true);
         if (t > SPIN_AT) {
-          const p = clamp((t - SPIN_AT) / SPIN);
+          // na galeria a chegada termina com o carro parado e nítido; o giro fica para quando pedirem
+          const p = embedded ? 1 : clamp((t - SPIN_AT) / SPIN);
           s.theta = 360 * easeInOut(p);
           if (p >= 1) {
             s.introDone = true;
             s.theta = 0;
             s.hlTarget = 0;
             s.lastInteract = now - 2500;
+            if (restAngle !== null) s.target = restAngle;
           }
         } else s.theta = 0;
       } else {
         if (s.mode === "none") {
           if (s.target !== null) {
             const diff = shortest(s.theta, s.target);
-            s.theta += diff * Math.min(1, dt * 7);
+            s.theta += diff * Math.min(1, dt * (hero ? 2.2 : 7));
             if (Math.abs(diff) < 0.2) {
               s.theta = s.target;
               s.target = null;
@@ -372,7 +413,7 @@ export function Showroom({
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [ready, ring, layers, hasTop, hasBottom, showHud]);
+  }, [ready, ring, layers, hasTop, hasBottom, showHud, embedded, hero, restAngle]);
 
   // ---------------------------------------------------------------- interação
   const interact = () => {
@@ -469,6 +510,8 @@ export function Showroom({
 
   const goTo = (view: ShowcaseView) => {
     interact();
+    // quem escolheu um ângulo quer olhar para ele: o giro automático não pode tirar o carro dali
+    if (embedded) setPlaying(false);
     const s = sim.current;
     s.zoomTarget = 1;
     if (view === "top" || view === "bottom") {
@@ -482,6 +525,20 @@ export function Showroom({
     s.target = s.theta + shortest(s.theta, VIEW_ANGLE[view as ShowcaseRingView]);
     s.vel = 0;
   };
+
+  useImperativeHandle(controls, () => ({
+    goTo,
+    setAutoplay: (on) => {
+      skipIntro();
+      const s = sim.current;
+      s.target = null;
+      s.zoomTarget = 1;
+      s.phiTarget = 0;
+      setElevation(0);
+      if (on) s.lastInteract = 0; // começa a girar já, sem a espera de depois de uma interação
+      setPlaying(on);
+    },
+  }));
 
   const zoom = (dir: 1 | -1) => {
     interact();
@@ -582,6 +639,8 @@ export function Showroom({
   const glassPanel = light ? "border-zinc-900/10 bg-white/55" : "border-white/10 bg-white/[0.05]";
   const muted = light ? "text-zinc-500" : "text-white/50";
   const openPhoto = detail?.hotspot.photos[detail.photo];
+  const bronze = embedded && !light; // estúdio aceso em tons quentes, combinando com a página do produto
+  const stageBg = light ? "bg-[#ecebe7]" : bronze ? "bg-[#2a1f19]" : "bg-[#06070a]";
 
   return (
     <section
@@ -590,11 +649,13 @@ export function Showroom({
       onKeyDown={onKeyDown}
       aria-label={`Showroom 360° — ${name}. Arraste para girar.`}
       data-theme={light ? "light" : "dark"}
+      data-tone={bronze ? "bronze" : undefined}
+      data-hero={hero ? "1" : undefined}
       className={cn(
         "showroom relative isolate overflow-hidden outline-none select-none",
-        light ? "bg-[#ecebe7]" : "bg-[#06070a]",
+        stageBg,
         fg,
-        fullscreen ? "h-screen" : "h-[76vh] min-h-[540px] max-h-[880px] rounded-[36px] shadow-[0_40px_90px_-40px_rgb(0_0_0/0.8)]",
+        fullscreen ? "h-screen" : embedded ? "h-full rounded-[32px]" : "h-[76vh] min-h-[540px] max-h-[880px] rounded-[36px] shadow-[0_40px_90px_-40px_rgb(0_0_0/0.8)]",
         className,
       )}
       style={{ "--brand": brand } as React.CSSProperties}
@@ -602,6 +663,8 @@ export function Showroom({
       {/* ambiente */}
       <div className="showroom-ambient" />
       <div className="showroom-spot" />
+      {bronze && !hero && <div className="showroom-arc" />}
+      {backdrop}
       {showcase.studio === "logo" && logoUrl && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={logoUrl} alt="" className="pointer-events-none absolute left-1/2 top-[7%] h-[13%] -translate-x-1/2 object-contain opacity-80" />
@@ -621,7 +684,10 @@ export function Showroom({
           interact();
           sim.current.zoomTarget = sim.current.zoomTarget > 1.2 ? 1 : 2;
         }}
-        className="absolute inset-x-[4%] bottom-[24%] top-[17%] cursor-grab touch-pan-y active:cursor-grabbing sm:inset-x-[10%]"
+        className={cn(
+          "absolute cursor-grab touch-pan-y active:cursor-grabbing",
+          hero ? "inset-x-0 bottom-[30%] top-[30%] sm:inset-x-[12%] sm:bottom-[22%] sm:top-[31%]" : embedded && !fullscreen ? "inset-x-[2%] bottom-[14%] top-[10%] sm:bottom-[17%]" : "inset-x-[4%] bottom-[24%] top-[17%] sm:inset-x-[10%]",
+        )}
       >
         <div className="showroom-turntable" />
         <div ref={carRef} className="absolute inset-0 origin-[50%_85%] [perspective:1600px]" style={{ transform: "scale(0.14)" }}>
@@ -636,23 +702,30 @@ export function Showroom({
       <div className="showroom-bloom" />
 
       {/* HUD */}
-      <div ref={hudRef} className="pointer-events-none absolute inset-0 transition-opacity duration-1000" style={{ opacity: 0 }}>
-        <div className="flex items-start justify-between gap-4 p-5 sm:p-8">
-          <div className="max-w-xl">
-            <span className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] backdrop-blur-md", glassPanel, light ? "text-zinc-700" : "text-white/80")}>
-              <span className="size-1.5 animate-pulse rounded-full bg-[var(--brand)] shadow-[0_0_10px_var(--brand)]" /> Showroom 360°
-            </span>
-            {eyebrow && <p className={cn("mt-4 text-xs font-medium uppercase tracking-[0.2em]", muted)}>{eyebrow}</p>}
-            <h2 className="mt-1 text-2xl font-semibold tracking-[-0.03em] sm:text-5xl">{name}</h2>
-            {price && <p className={cn("mt-2 text-lg font-medium tabular-nums sm:text-xl", light ? "text-zinc-700" : "text-white/80")}>{price}</p>}
-          </div>
+      <div ref={hudRef} className={cn("pointer-events-none absolute inset-0 transition-opacity duration-1000", hero && "hidden")} style={{ opacity: 0 }}>
+        <div className={cn("flex items-start justify-between gap-4", embedded ? "p-3 sm:p-4" : "p-5 sm:p-8")}>
+          {embedded ? (
+            <span />
+          ) : (
+            <div className="max-w-xl">
+              <span className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] backdrop-blur-md", glassPanel, light ? "text-zinc-700" : "text-white/80")}>
+                <span className="size-1.5 animate-pulse rounded-full bg-[var(--brand)] shadow-[0_0_10px_var(--brand)]" /> Showroom 360°
+              </span>
+              {eyebrow && <p className={cn("mt-4 text-xs font-medium uppercase tracking-[0.2em]", muted)}>{eyebrow}</p>}
+              <h2 className="mt-1 text-2xl font-semibold tracking-[-0.03em] sm:text-5xl">{name}</h2>
+              {price && <p className={cn("mt-2 text-lg font-medium tabular-nums sm:text-xl", light ? "text-zinc-700" : "text-white/80")}>{price}</p>}
+            </div>
+          )}
           <div className="pointer-events-auto flex shrink-0 gap-2">
             <button type="button" onClick={startIntro} className={cn(glassBtn, "max-sm:hidden")} title="Ver a chegada de novo" aria-label="Ver a chegada de novo">
               <Sparkles className="size-4" />
             </button>
-            <button type="button" onClick={() => setPlaying((p) => !p)} className={glassBtn} title={playing ? "Pausar giro automático" : "Girar sozinho"} aria-label={playing ? "Pausar giro automático" : "Girar sozinho"}>
-              {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
-            </button>
+            {/* na galeria quem liga o giro é o bloco 360° ao lado das miniaturas, que não aparece em tela cheia */}
+            {(!embedded || fullscreen) && (
+              <button type="button" onClick={() => setPlaying((p) => !p)} className={glassBtn} title={playing ? "Pausar giro automático" : "Girar sozinho"} aria-label={playing ? "Pausar giro automático" : "Girar sozinho"}>
+                {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
+              </button>
+            )}
             <button type="button" onClick={toggleFullscreen} className={glassBtn} title="Tela cheia" aria-label="Tela cheia">
               {fullscreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
             </button>
@@ -660,7 +733,7 @@ export function Showroom({
         </div>
 
         {/* ficha técnica */}
-        {specs.length > 0 && (
+        {specs.length > 0 && !embedded && (
           <dl className={cn("absolute bottom-6 right-6 hidden w-[300px] grid-cols-2 gap-x-5 gap-y-3 rounded-3xl border p-5 backdrop-blur-md xl:grid", glassPanel)}>
             {specs.slice(0, 6).map((s) => (
               <div key={s.label}>
@@ -676,14 +749,15 @@ export function Showroom({
           {!interacted && (
             <p className={cn("flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-medium backdrop-blur-md", light ? "bg-white/60 text-zinc-700" : "bg-black/30 text-white/80")}>
               <Hand className="showroom-hand size-4" /> Arraste para girar 360°
-              <span className="max-sm:hidden">· pinça ou Ctrl + roda para zoom</span>
+              {!embedded && <span className="max-sm:hidden">· pinça ou Ctrl + roda para zoom</span>}
             </p>
           )}
-          <div className="pointer-events-auto flex items-center gap-3">
+          {/* no celular o palco embutido é baixo: o zoom fica na pinça, para os botões não cobrirem o carro */}
+          <div className={cn("pointer-events-auto flex items-center gap-3", embedded && !fullscreen && "max-sm:hidden")}>
             <button type="button" onClick={() => zoom(-1)} className={glassBtn} aria-label="Afastar">
               <Minus className="size-4" />
             </button>
-            <div className={cn("relative grid size-[66px] place-items-center rounded-full border backdrop-blur-md sm:size-[74px]", glassPanel)}>
+            <div className={cn("relative grid place-items-center rounded-full border backdrop-blur-md", embedded ? "size-[52px]" : "size-[66px] sm:size-[74px]", glassPanel)}>
               <svg viewBox="-50 -50 100 100" className="size-full">
                 {Array.from({ length: 24 }, (_, i) => (
                   <line key={i} x1="0" y1="-44" x2="0" y2={i % 6 === 0 ? -37 : -40} stroke="currentColor" strokeOpacity={i % 6 === 0 ? 0.5 : 0.2} strokeWidth="1.5" transform={`rotate(${i * 15})`} />
@@ -717,7 +791,7 @@ export function Showroom({
               })}
             </div>
           )}
-          <div className={cn("pointer-events-auto flex max-w-full gap-1 overflow-x-auto rounded-full border p-1 backdrop-blur-md [scrollbar-width:none]", glassPanel)}>
+          <div className={cn("pointer-events-auto flex max-w-full gap-1 overflow-x-auto rounded-full border p-1 backdrop-blur-md [scrollbar-width:none]", glassPanel, embedded && !fullscreen && "hidden")}>
             {viewButtons.map((v) => (
               <button
                 key={v}
@@ -803,7 +877,7 @@ export function Showroom({
       )}
 
       {/* carregando */}
-      <div className={cn("absolute inset-0 grid place-items-center transition-opacity duration-700", light ? "bg-[#ecebe7]" : "bg-[#06070a]", ready ? "pointer-events-none opacity-0" : "opacity-100")}>
+      <div className={cn("absolute inset-0 grid place-items-center transition-opacity duration-700", stageBg, ready ? "pointer-events-none opacity-0" : "opacity-100")}>
         <div className="w-56 text-center">
           <p className={cn("text-[11px] font-semibold uppercase tracking-[0.25em]", light ? "text-zinc-500" : "text-white/60")}>Preparando o showroom</p>
           <div className={cn("mt-4 h-0.5 overflow-hidden rounded-full", light ? "bg-zinc-900/10" : "bg-white/10")}>

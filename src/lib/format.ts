@@ -1,10 +1,13 @@
 import type { CouponType, OrderStatus, PaymentMethod, PaymentStatus, StockReason, StoreStatus } from "./types";
 
 const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
+const brlWhole = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
 const compact = new Intl.NumberFormat("pt-BR", { notation: "compact", maximumFractionDigits: 1 });
 
 export const money = (v: number) => brl.format(v);
 export const compactNumber = (v: number) => compact.format(v);
+/** Sem ",00" quando o valor é inteiro: "R$ 155.000". */
+export const moneyShort = (v: number) => (Number.isInteger(v) ? brlWhole.format(v) : brl.format(v));
 
 export const date = (iso: string) =>
   new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" });

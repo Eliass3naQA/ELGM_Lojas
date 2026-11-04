@@ -95,7 +95,7 @@ export function LoginPanel({ slug, storeName, next }: { slug: string; storeName:
 
       {provider && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => !loading && setProvider(null)}>
-          <div className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-2xl animate-fade-up" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-sm overflow-hidden rounded-2xl glass-strong shadow-2xl animate-fade-up" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-800">
               <FlaskConical className="size-3.5" /> Simulação: em produção abre a tela oficial de login
               <button onClick={() => setProvider(null)} className="ml-auto rounded p-0.5 hover:bg-amber-100" aria-label="Fechar">

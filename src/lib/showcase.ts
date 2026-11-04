@@ -55,3 +55,11 @@ export const ringViews = (s: Showcase) => SHOWCASE_RING.filter((v) => s.views[v]
 
 /** O showroom só aparece com pelo menos 2 fotos ao redor do produto. */
 export const hasShowroom = (p: Pick<Product, "showcase">): p is { showcase: Showcase } => !!p.showcase && ringViews(p.showcase).length >= 2;
+
+const DISPLAY_ORDER: ShowcaseRingView[] = ["frontRight", "frontLeft", "right", "left", "front", "backRight", "backLeft", "back"];
+
+/** Ângulos do mais vistoso para o menos: o primeiro é a capa, o segundo aparece ao passar o mouse. */
+export const displayViews = (s: Showcase) => DISPLAY_ORDER.filter((v) => s.views[v]);
+
+/** Com estúdio ligado as fotos são recortes sem fundo: podem pousar sobre qualquer cenário. */
+export const hasCutouts = (p: Pick<Product, "showcase">) => hasShowroom(p) && !!p.showcase.studio;
